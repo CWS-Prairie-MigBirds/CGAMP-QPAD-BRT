@@ -1,0 +1,107 @@
+---
+  title: "Align Spatial Data"
+author: "Barry Rboinson"
+date: "November 28, 2018"
+output: html_document
+---
+  
+  Set-up workspace and load data
+```{r}
+setwd("W:/Priority_Areas_Analysis/Data/Covariates/IntersectRasters") #laptop
+setwd("Q:/GW/EC1130MigBirds_OiseauxMig/PN_CWS_MigBirds/Priority_Areas_Analysis/Data/Covariates/IntersectRasters") #remote desktop
+
+library(raster)
+
+# list.files("W:/Priority_Areas_Analysis/Data/Covariates/IntersectRasters/ACI/2017")
+# list.files("Q:/GW/EC1130MigBirds_OiseauxMig/PN_CWS_MigBirds/Priority_Areas_Analysis/Data/Covariates/IntersectRasters/EastingNorthing/eastingnorthing.gbd")
+
+#allocate more memory to R
+memory.limit(size=200000)
+
+#Import habitat data
+grass100 <- raster("ACI/2017/grass17_100") 
+grass800 <- raster("ACI/2017/grass17_800")
+crop100 <- raster("ACI/2017/crop17_100")
+crop800 <- raster("ACI/2017/crop17_800")
+shrub100 <- raster("ACI/2017/shrub17_100")
+shrub800 <- raster("ACI/2017/shrub17_800")
+
+#import easting northing
+Easting <- raster("EastingNorthing/Easting")
+Northing <- raster("EastingNorthing/Northing")
+
+#NDVI
+early250 <- raster("NDVI/2017/Reproject/early17_250")
+early800 <- raster("NDVI/2017/Reproject/early17_800")
+
+mid250 <- raster("NDVI/2017/Reproject/mid17_250")
+mid800 <- raster("NDVI/2017/Reproject/mid17_800")
+
+late250 <- raster("NDVI/2017/Reproject/late17_250")
+late800 <- raster("NDVI/2017/Reproject/late17_800")
+
+#TWI
+twi100 <- raster("TWI_Mean/twi_100")
+twi800 <- raster("TWI_Mean/twi_800")
+
+twisd100 <- raster("TWI_SD/twisd_100")
+twisd800 <- raster("TWI_SD/twisd_800")
+
+#basin area
+ba100 <- raster("WetlandArea/ba_100")
+ba800 <- raster("WetlandArea/ba_800")
+
+#basin count
+bc100 <- raster("WetlandCount/bc_100")
+bc800 <- raster("WetlandCount/bc_800")
+
+#Weather rasters
+precip <- raster("TotPrecip2017.grd")
+GDD <-raster("TotGDD2017.grd")
+
+#create list of all raster layers
+rasterList <- as.list(environment())
+#rasterList <- rasterList[!names(rasterList) %in% c("rasterList","Easting")]
+names(rasterList)
+#remove individual rasters from the envorinment so that they are only in rasterList
+rm(list=setdiff(ls(), "rasterList"))
+
+#create another list to contain modified raster layers
+rasterList_ <- vector(mode="list",length=length(rasterList))
+names(rasterList_) <-names(rasterList)
+
+```
+
+#change resolution of Easting, which will become our template for all others, and us it to clip the ACI habitat layers
+```{r}
+#change resolution to 800m, save to ExtrapolateRaster because this will be the final product
+rasterList_[["Easting"]] <- projectRaster(from=rasterList[["Easting"]], res=c(800,800), method="bilinear", crs=crs(rasterList[["Easting"]]), 
+                                          file="Q:/GW/EC1130MigBirds_OiseauxMig/PN_CWS_MigBirds/Priority_Areas_Analysis/Data/Covariates/ExtrapolateRaster/Easting.grd")
+
+#crop the ACI habitat layers with Easting, save to Temp
+ACI <- c("grass100","grass800","shrub100","shrub800","crop100","crop800")
+for (i in ACI) {
+  rasterList[[i]] <- crop(x=rasterList[[i]], y=rasterList_[["Easting"]],
+                           file=paste0("Q:/GW/EC1130MigBirds_OiseauxMig/PN_CWS_MigBirds/Priority_Areas_Analysis/Temp/",i,".grd"))
+}
+```
+
+Align all rasters with Easting, including projection, resolution, origin, and dimension
+```{r}
+#list all rasters except Easting, save new rasters
+alignList <- names(rasterList)[names(rasterList)!="Easting"]
+for (i in alignList) {
+  rasterList_[[i]] <- projectRaster(from=rasterList[[i]], to=rasterList_[["Easting"]], method="bilinear",
+                                    file=paste0("Q:/GW/EC1130MigBirds_OiseauxMig/PN_CWS_MigBirds/Priority_Areas_Analysis/Data/Covariates/ExtrapolateRaster",i,".grd"))
+}
+
+#stack rasters
+covars <- stack(rasterList_)
+```
+
+#align weather rasters, GDD and summer precip with all others (layers created after the above in 2017. May not need this step in future workflow)
+```{r}
+GDD <- raster()
+```
+
+

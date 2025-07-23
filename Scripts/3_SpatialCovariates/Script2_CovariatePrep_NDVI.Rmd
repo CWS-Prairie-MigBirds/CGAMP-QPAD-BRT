@@ -1,0 +1,512 @@
+---
+title: "Script2 - NDVI covariate preparation"
+author: "Barry Robinson"
+date: "September 16, 2019"
+output: html_document
+---
+
+#Download the early, mid and late season NDVI MODIS data from the GDR on InGeo
+```{r}
+setwd("Y:/gdr/NON_EC_DATA/010-imageryBaseMapsEarthCover/LANDCOVER/CA/AAFCNDVI")
+#The suffix of each NDVI file name indicates the start and end date of the week the data represent in the form YYDDD.YYDDD, where DDD is Ordinal Day. Find the files that contain the following ordinal days to represent early, mid, and late season NDVI, respectively: 138, 162, 186.
+
+#loop through each year and find the appropriate list of files to copy to temp drive
+###*If downloading from zipped files, use lines 1-31 in Script2a in place of lines 15-37 below
+years <- as.character(2009:2016) #list years to extract data from
+file.list <- vector(mode="list", length=length(years))
+names(file.list) <- years
+#list ordinal days (target day are 138, 162, and 186, but also downloading previous and subsequent weeks to fill cloud gaps)
+OD <- c("131","138","145","155","162","169","179","186","193")
+OD.list <- vector(mode="list", length=length(OD))
+names(OD.list) <- OD
+
+for (i in years) {
+  file.list[[i]] <- OD.list
+  dir.create(paste("C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/Temp",i,sep="/"))
+  for (j in OD) {
+    file.list[[i]][[j]] <- list.files(i)
+    file.list[[i]][[j]] <- substr(file.list[[i]][[j]],nchar(file.list[[i]][[j]])-14, nchar(file.list[[i]][[j]]))
+    file.list[[i]][[j]] <- file.list[[i]][[j]][which(as.numeric(substr(file.list[[i]][[j]],5,7)) <= as.numeric(j) & 
+                                             as.numeric(substr(file.list[[i]][[j]],13,15)) >= as.numeric(j))]
+    file.list[[i]][[j]] <- list.files(i)[grep(list.files(i), pattern = file.list[[i]][[j]])]
+    file.list[[i]][[j]] <- paste0(i,"/",file.list[[i]][[j]],"/",file.list[[i]][[j]],".tif")
+    dir.tmp <- paste("C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/Temp",i,j,sep="/")
+    dir.create(dir.tmp)
+    file.copy(from = file.list[[i]][[j]], to = dir.tmp)
+  }
+}
+```
+
+#Create raster stacks for each timeseries (early, mid, late) and reproject and crop based on ACI layer (maintain resolution)
+```{r}
+#load rasters into workspace
+library(raster)
+setwd("C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/Temp")
+#update year list to include years that were downloaded from zipped files
+years <- as.character(2009:2019)
+OD <- c("131","138","145","155","162","169","179","186","193")
+#define ODs for early, mid, and late season time series
+ear <- OD[1:3]
+mid <- OD[4:6]
+lat <- OD[7:9]
+
+#create raster stacks for each time series and change names in each stack to format NDVI_YYYYDDD
+E <- stack(list.files(path=paste(rep(years,length(ear)), rep(ear,length(years)), sep="/"), full.names = T))
+M <- stack(list.files(path=paste(rep(years,length(mid)), rep(mid,length(years)), sep="/"), full.names = T))
+L <- stack(list.files(path=paste(rep(years,length(lat)), rep(lat,length(years)), sep="/"), full.names = T))
+count <- 1
+for (i in years) {
+  for (j in ear) {
+    names(E[[count]]) <- paste0("NDVI_",i,j)
+    count <- count+1
+  }
+}
+count <- 1
+for (i in years) {
+  for (j in mid) {
+    names(M[[count]]) <- paste0("NDVI_",i,j)
+    count <- count+1
+  }
+}
+count <- 1
+for (i in years) {
+  for (j in lat) {
+    names(L[[count]]) <- paste0("NDVI_",i,j)
+    count <- count+1
+  }
+}
+
+#unstack all three stacks into a list of raster, so rasters can be reprojected in parellel.
+rasterList <- c(unstack(E), unstack(M), unstack(L))
+rm(E,L,M)
+
+#define function for projectRaster and crop in parallel
+pR.par <- function(x) {
+  require(raster)
+  temp = projectRaster(from=x, crs=crs(template), method="bilinear", filename=paste0("temp1_",names(x), ".tif"))
+  temp = crop(x=temp, y=template, filename = paste0(names(x), ".tif"))
+  return(temp)
+}
+
+#load ACI to use as template for crs
+template <- raster("C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/GIS/Rasters/BRT_covariates/ACI/grass2018.tif")
+
+#set up clusters for multi-core processing
+library(parallel)
+cl <- makeCluster(19) 
+clusterEvalQ(cl,library(raster)) #load package in the cluster
+clusterExport(cl,"rasterList"); clusterExport(cl,"pR.par"); clusterExport(cl,"template") #move required objects to the cluster
+
+#run reclassify in parallel
+rasterList <- parLapply(cl=cl, X=rasterList, fun=pR.par)
+stopCluster(cl)
+
+#delete temp1 files (reprojected, but not cropped)
+unlink(list.files(pattern="temp1_"))
+
+#restack rasters into early, mid, and late
+#Modify this code below if implementing IMA method across multiple years
+E <- stack(rasterList[1:30])
+M <- stack(rasterList[31:60])
+L <- stack(rasterList[61:90])
+
+#Run this code if running IMA for only 1 year
+E <- stack(rasterList[1:3])
+M <- stack(rasterList[4:6])
+L <- stack(rasterList[7:9])
+
+rm(rasterList)
+```
+
+#Implement IMA method for filling in clouds 
+```{r}
+library(RGISTools)
+library(raster)
+setwd("C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/Temp")
+#run 3 lines below if starting here and reprojected and cropped rasters need to be imported
+# E <- stack(list.files(pattern="131.tif|138.tif|145.tif"))
+# M <- stack(list.files(pattern="155.tif|162.tif|169.tif"))
+# L <- stack(list.files(pattern="179.tif|186.tif|193.tif"))
+
+#test without filtering out extreme anomolies
+#Modify this code below if implementing IMA method across multiple years
+E.fill <- genSmoothingIMA(E, Img2Fill = c(2,5,8,11,14,17,20,23,26,29), nDays = 8, nYears = 0, 
+                          fact = 50, aFilter = c(0, 1), snow.mode = T, out.name = "ear",
+                          AppRoot = getwd())
+M.fill <- genSmoothingIMA(M, Img2Fill = c(2,5,8,11,14,17,20,23,26,29), nDays = 8, nYears = 0, 
+                          fact = 50, aFilter = c(0, 1), snow.mode = T, out.name = "mid",
+                          AppRoot = getwd())
+L.fill <- genSmoothingIMA(L, Img2Fill = c(2,5,8,11,14,17,20,23,26,29), nDays = 8, nYears = 0, 
+                          fact = 50, aFilter = c(0, 1), snow.mode = T, out.name = "lat",
+                          AppRoot = getwd())
+
+#Run this code if running IMA for only 1 year
+E.fill <- genSmoothingIMA(E, Img2Fill = c(2), nDays = 8, nYears = 0, 
+                          fact = 50, aFilter = c(0, 1), snow.mode = T, out.name = "ear",
+                          AppRoot = getwd())
+M.fill <- genSmoothingIMA(M, Img2Fill = c(2), nDays = 8, nYears = 0, 
+                          fact = 50, aFilter = c(0, 1), snow.mode = T, out.name = "mid",
+                          AppRoot = getwd())
+L.fill <- genSmoothingIMA(L, Img2Fill = c(2), nDays = 8, nYears = 0, 
+                          fact = 50, aFilter = c(0, 1), snow.mode = T, out.name = "lat",
+                          AppRoot = getwd())
+
+```
+
+#plot a comparison of original and smoothed NDVI rasters
+```{r}
+#Import IMA filled raster layers into list of raster lists
+raster.list <- list(e = lapply(list.files("ear",full.names = T), raster),
+                    m = lapply(list.files("mid",full.names = T), raster),
+                    l = lapply(list.files("lat",full.names = T), raster))
+
+#take a random sample of 100000 pixels
+sample <- sample(35197190,100000)
+
+#plot early
+plot(x=raster.list[["e"]][[10]][sample],y=E[[29]][sample])
+plot(x=raster.list[["e"]][[9]][sample],y=E[[26]][sample])
+plot(x=raster.list[["e"]][[8]][sample],y=E[[23]][sample])
+plot(x=raster.list[["e"]][[7]][sample],y=E[[20]][sample])
+plot(x=raster.list[["e"]][[6]][sample],y=E[[17]][sample])
+plot(x=raster.list[["e"]][[5]][sample],y=E[[14]][sample])
+plot(x=raster.list[["e"]][[4]][sample],y=E[[11]][sample])
+plot(x=raster.list[["e"]][[3]][sample],y=E[[8]][sample])
+plot(x=raster.list[["e"]][[2]][sample],y=E[[5]][sample])
+plot(x=raster.list[["e"]][[1]][sample],y=E[[2]][sample])
+
+#plot mid
+plot(x=raster.list[["m"]][[10]][sample],y=M[[29]][sample])
+plot(x=raster.list[["m"]][[9]][sample],y=M[[26]][sample])
+plot(x=raster.list[["m"]][[8]][sample],y=M[[23]][sample])
+plot(x=raster.list[["m"]][[7]][sample],y=M[[20]][sample])
+plot(x=raster.list[["m"]][[6]][sample],y=M[[17]][sample])
+plot(x=raster.list[["m"]][[5]][sample],y=M[[14]][sample])
+plot(x=raster.list[["m"]][[4]][sample],y=M[[11]][sample])
+plot(x=raster.list[["m"]][[3]][sample],y=M[[8]][sample])
+plot(x=raster.list[["m"]][[2]][sample],y=M[[5]][sample])
+plot(x=raster.list[["m"]][[1]][sample],y=M[[2]][sample])
+
+#plot late
+plot(x=raster.list[["l"]][[10]][sample],y=L[[29]][sample])
+plot(x=raster.list[["l"]][[9]][sample],y=L[[26]][sample])
+plot(x=raster.list[["l"]][[8]][sample],y=L[[23]][sample])
+plot(x=raster.list[["l"]][[7]][sample],y=L[[20]][sample])
+plot(x=raster.list[["l"]][[6]][sample],y=L[[17]][sample])
+plot(x=raster.list[["l"]][[5]][sample],y=L[[14]][sample])
+plot(x=raster.list[["l"]][[4]][sample],y=L[[11]][sample])
+plot(x=raster.list[["l"]][[3]][sample],y=L[[8]][sample])
+plot(x=raster.list[["l"]][[2]][sample],y=L[[5]][sample])
+plot(x=raster.list[["l"]][[1]][sample],y=L[[2]][sample])
+
+rm(E,L,M)
+```
+
+
+#Use ACI layer as a template to reproject NDVI raster to same origin, extent, resolution, etc.
+```{r}
+#Redefine years and ODs
+years <- as.character(2019)
+OD <- c("e","m","l")#for early, mid, and late season
+names(OD) <- OD
+#names each raster in each OD with the appropriate year
+for(i in OD) {
+  names(raster.list[[i]]) <- years
+}
+
+#create a list of lists where each element contains inputs for projectRaster function for each year and OD
+m800.list <- vector(mode="list", length=length(years)*length(OD))
+# OD.names <- c("e","m","l") #change ODs to more meaningful names
+# names(OD.names) <- OD
+template <- raster("C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/GIS/Rasters/BRT_covariates/ACI/grass2018.tif")
+count <- 1
+for (i in OD) {
+  for (j in years) {
+    m800.list[[count]] <- list(from=raster.list[[i]][[j]], to=template, filename=paste0("NDVI",j,OD[[i]],".tif"))
+    count = count+1
+  }
+}
+
+#define projectRaster function for multi-core processing 
+pR.par <- function(x) {
+  require(raster)
+  projectRaster(from=x$from, to=x$to, method="bilinear", filename=x$filename)
+}
+
+#set up clusters for multi-core processing
+library(parallel)
+cl <- makeCluster(detectCores()-1)
+clusterEvalQ(cl,library(raster)) #load package in the cluster
+clusterExport(cl,"m800.list"); clusterExport(cl,"pR.par") #move required objects to the cluster
+
+#run reclassify in parallel
+ndvi800m <- parLapply(cl=cl, X=m800.list, fun=pR.par)
+stopCluster(cl)
+rm(m800.list,raster.list)
+
+#delete original NDVI files
+unlink(list.files(pattern="NDVI_"))
+unlink(list.files(path="ear", full.names=T))
+unlink(list.files(path="mid", full.names=T))
+unlink(list.files(path="lat", full.names=T))
+```
+
+#Calculate zonal statistics for each year: mean NDVI value in 2 roving windows: 3x3 pixels and 5x5
+```{r}
+setwd("C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/Temp")
+##Only run this script if you've lost ndvi800m######
+temp<- list.files(pattern="NDVI")
+temp<- temp[which(nchar(temp)==13)]
+library(raster)
+ndvi800m <- lapply(temp,raster)
+rm(temp)
+####################################################
+
+#create matrices to represent the roving windows: 3x3 pixels (9 pixels) and 5x5 (25 pixels)
+scale <- c("9","25")
+w <- list(matrix(1,3,3), matrix(1,5,5))
+names(w) <- scale
+#create a list with an element for each yearXODXscale intersection; each element with be a list containing the appropirate NDVI raster layer, roving window matrix, and filename
+yr.OD.scale <- vector(mode="list",length=length(ndvi800m)*length(scale))
+count=1
+for (i in 1:length(ndvi800m)) {
+  for (j in scale) {
+    yr.OD.scale[[count]] <- list(raster=ndvi800m[[i]], w=w[[j]], filename=paste0(names(ndvi800m[[i]]), "_", j, ".tif"))
+    count <- count + 1
+  }
+}
+
+#define focal function for multi-core processing
+focal.par <- function(x) {
+  require(raster)
+  focal(x=x$raster, w=x$w, fun=mean, filename=x$filename, na.rm=T)
+}
+
+#set up clusters for multi-core processing
+cl <- makeCluster(detectCores() - 1) #there are 48 elements in the list, so assign all available cores (19)
+clusterEvalQ(cl,library(raster)) #load package in the cluster
+clusterExport(cl,"yr.OD.scale"); clusterExport(cl,"focal.par") #move required objects to the cluster
+
+#run reclassify in parallel
+NDVI.scale <- parLapply(cl=cl, X=yr.OD.scale, fun=focal.par)
+stopCluster(cl)
+rm(yr.OD.scale)
+```
+
+#Ensure to move final raster products to InGeo or elswere on local hard drive and delete from temp drive. 
+```{r}
+#All of the original NDVI files can be deleted because these are stored on the GDR
+#All 800x800m NDVI (original and 2 roving window mean versions) can be moved to Priority Areas Analysis/Data/GIS/Rasters/NDVI
+file.copy(from = list.files(pattern="NDVI"), to="C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/GIS/Rasters/BRT_covariates/NDVI")
+
+unlink(list.files(pattern="NDVI"))
+```
+
+###############################################################################################
+##***NOT NEEDED ANYMORE BECAUSE I FILLED NAs ASSOCIATEDS WITH CLOUDS USING IMA METHOD ABOVE***##
+###############################################################################################
+#Replace images with large amounts of cloud cover over the Prairies. Test image from week before and week after to determine min cloud cover
+```{r}
+#Determine number of cells with NA to evaluate amount of cloud cover in each image
+cloud <- vector(mode="list",length=length(ndvi800m))
+names <- vector(mode="list",length=length(ndvi800m))
+for (i in 1:length(ndvi800m)) {
+  cloud[[i]] <- freq(ndvi800m[[i]], digits=0, useNA='always')
+  names[[i]] <- names(ndvi800m[[i]])
+}
+names(cloud) <- names
+
+#create list of rasters that have > 2,160,000 pixels with NA values
+replace <- list()
+for (i in 1:length(ndvi800m)) {
+  if (cloud[[i]][3,"count"]>2160000) {
+    replace <- c(replace,names(cloud)[i])
+  }
+}
+
+#download replacement images for each item in replace. Replace with image from the previous week.
+###*If downloading from zipped files, use lines 44-60 in Script2a in place of lines 109-123 below
+setwd("Y:/gdr/NON_EC_DATA/010-imageryBaseMapsEarthCover/LANDCOVER/CA/AAFCNDVI")
+file.list <- vector(mode="list", length=length(replace))
+for (i in 1:length(replace)) {
+  temp.OD <- ifelse(substr(replace[[i]],nchar(replace[[i]]),nchar(replace[[i]]))=="e",138,
+                     ifelse(substr(replace[[i]],nchar(replace[[i]]),nchar(replace[[i]]))=="m",162,
+                               186)) #determine appropriate Ordinal Day
+  temp.yr <- substr(replace[[i]],5,8) #determine year folder to look in
+  file.list[[i]] <- list.files(temp.yr)
+  temp.str <- substr(file.list[[i]],nchar(file.list[[i]])-14, nchar(file.list[[i]])) #isolatre start and end dates from file name
+  file.list[[i]] <- temp.str[which(as.numeric(substr(temp.str,5,7)) <= temp.OD & #find file which spans temp.OD and subtract 1 to choose previous file
+                                                     as.numeric(substr(temp.str,13,15)) >= temp.OD)-1] 
+  file.list[[i]] <- list.files(temp.yr)[grep(list.files(temp.yr), pattern = file.list[[i]])] #save appropirate file name
+  file.list[[i]] <- paste0(temp.yr,"/",file.list[[i]],"/",file.list[[i]],".tif") #add directory to file name
+  file.copy(from = file.list[[i]], to = "C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/Temp/replace/") #copy file
+}
+
+#reproject replacement images with ACI layer as template
+setwd("C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/Temp/replace")
+#import replacement rasters
+replace.raster <- lapply(list.files(),raster)
+#create list of input for multi-core version of projectRaster 
+for (i in 1:length(replace.raster)) {
+  replace.raster[[i]] <- list(from=replace.raster[[i]], to=template, filename=paste0(replace[[i]],".tif"))
+}
+
+#set up clusters for multi-core processing
+library(parallel)
+cl <- makeCluster(6) #only using 6 cores to minimize RAM bottleneck
+clusterEvalQ(cl,library(raster)) #load package in the cluster
+clusterExport(cl,"replace.raster"); clusterExport(cl,"pR.par") #move required objects to the cluster
+
+#run projectRaster in parallel
+ndvi.replace <- parLapply(cl=cl, X=replace.raster, fun=pR.par)
+stopCluster(cl)
+rm(replace.raster)
+unlink(list.files(pattern="AgExtent")) #delete full NDVI images
+
+#Determine number of cells with NA to evaluate amount of cloud cover in each replacement image
+cloud2 <- vector(mode="list",length=length(ndvi.replace))
+names2 <- vector(mode="list",length=length(ndvi.replace))
+for (i in 1:length(ndvi.replace)) {
+  cloud2[[i]] <- freq(ndvi.replace[[i]], digits=0, useNA='always')
+  names2[[i]] <- names(ndvi.replace[[i]])
+}
+names(cloud2) <- names2
+
+#create list of rasters that have > 2,160,000 pixels with NA values
+replace2 <- list()
+for (i in 1:length(ndvi.replace)) {
+  if (cloud2[[i]][3,"count"]>2160000) {
+    replace2 <- c(replace2,names(cloud2)[i])
+  }
+}
+
+#files that are NOT in 'replace' can be copied over to Temp folder to replace first batch
+good <- substr(list.files(),1,9) #list all files in replce folder
+good <- good[which(!(good %in% unlist(replace2)))] #list files that are NOT in replace
+file.copy(from=paste0(good,".tif"), to="C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/Temp", overwrite = T)
+
+#delete remaining files
+unlink(list.files())
+
+#download second batch of replacement images for each item in replace2. This time replace with image from the following week.
+###*If downloading from zipped files, use lines 63-79 in Script2a in place of lines 174-187 below
+setwd("Y:/gdr/NON_EC_DATA/010-imageryBaseMapsEarthCover/LANDCOVER/CA/AAFCNDVI")
+file.list <- vector(mode="list", length=length(replace2))
+for (i in 1:length(replace2)) {
+  temp.OD <- ifelse(substr(replace2[[i]],nchar(replace2[[i]]),nchar(replace2[[i]]))=="e",138,
+                     ifelse(substr(replace2[[i]],nchar(replace2[[i]]),nchar(replace2[[i]]))=="m",162,
+                               186)) #determine appropriate Ordinal Day
+  temp.yr <- substr(replace2[[i]],5,8) #determine year folder to look in
+  file.list[[i]] <- list.files(temp.yr)
+  temp.str <- substr(file.list[[i]],nchar(file.list[[i]])-14, nchar(file.list[[i]])) #isolatre start and end dates from file name
+  file.list[[i]] <- temp.str[which(as.numeric(substr(temp.str,5,7)) <= temp.OD & #find file which spans temp.OD and add 1 to choose subsequent file
+                                                     as.numeric(substr(temp.str,13,15)) >= temp.OD)+1] 
+  file.list[[i]] <- list.files(temp.yr)[grep(list.files(temp.yr), pattern = file.list[[i]])] #save appropirate file name
+  file.list[[i]] <- paste0(temp.yr,"/",file.list[[i]],"/",file.list[[i]],".tif") #add directory to file name
+  file.copy(from = file.list[[i]], to = "C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/Temp/replace/") #copy file
+}
+
+#reproject second batch of replacement images with ACI layer as template
+setwd("C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/Temp/replace")
+#import replacement rasters
+replace.raster <- lapply(list.files(),raster)
+#create list of input for multi-core version of projectRaster 
+for (i in 1:length(replace.raster)) {
+  replace.raster[[i]] <- list(from=replace.raster[[i]], to=template, filename=paste0(replace2[[i]],".tif"))
+}
+
+#set up clusters for multi-core processing
+library(parallel)
+cl <- makeCluster(6) #only using 6 cores to minimize RAM bottleneck
+clusterEvalQ(cl,library(raster)) #load package in the cluster
+clusterExport(cl,"replace.raster"); clusterExport(cl,"pR.par") #move required objects to the cluster
+
+#run projectRaster in parallel
+ndvi.replace <- parLapply(cl=cl, X=replace.raster, fun=pR.par)
+stopCluster(cl)
+rm(replace.raster)
+unlink(list.files(pattern="AgExtent")) #delete full NDVI images
+
+#Determine number of cells with NA to evaluate amount of cloud cover in second batch of replacement images
+cloud3 <- vector(mode="list",length=length(ndvi.replace))
+names3 <- vector(mode="list",length=length(ndvi.replace))
+for (i in 1:length(ndvi.replace)) {
+  cloud3[[i]] <- freq(ndvi.replace[[i]], digits=0, useNA='always')
+  names3[[i]] <- names(ndvi.replace[[i]])
+}
+names(cloud3) <- names3
+
+#create list of rasters that have > 2,160,000 pixels with NA values
+replace3 <- list()
+for (i in 1:length(ndvi.replace)) {
+  if (cloud3[[i]][3,"count"]>2160000) {
+    replace3 <- c(replace3,names(cloud3)[i])
+  }
+}
+
+#files that are NOT in 'replace' can be copied over to Temp folder to replace first batch
+good <- substr(list.files(),1,9) #list all files in replce folder
+good <- good[which(!(good %in% unlist(replace3)))] #list files that are NOT in replace
+file.copy(from=paste0(good,".tif"), to="C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/Temp", overwrite = T)
+
+#delete remaining files
+unlink(list.files())
+
+#any remaining images in replace3 need to be compared across cloud, cloud2, and cloud3 to determine which image has the lowest amount of cloud
+cloud <- cloud[which(names(cloud) %in% unlist(replace3))]
+cloud2 <- cloud2[which(names(cloud2) %in% unlist(replace3))]
+cloud3 <- cloud3[which(names(cloud3) %in% unlist(replace3))]
+index <- vector(mode="list",length=length(replace3))
+names(index) <- names(cloud3)
+for(i in names(cloud3)) {
+  test <- min(cloud[[i]][3,"count"],cloud2[[i]][3,"count"],cloud2[[i]][3,"count"])
+  index[[i]] <- ifelse(cloud[[i]][3,"count"]==test,0, #if cloud is lowest, return original OD
+                       ifelse(cloud2[[i]][3,"count"]==test,-1,1)) #if cloud2 is lowest, return previous image, else return subsequent image
+}
+
+#download final batch of replacement images for each item in replace3. Use 'index' to determine which image to download
+###*If downloading from zipped files, use lines 82-98 in Script2a in place of lines 249-263 below
+setwd("Y:/gdr/NON_EC_DATA/010-imageryBaseMapsEarthCover/LANDCOVER/CA/AAFCNDVI")
+file.list <- vector(mode="list", length=length(replace3))
+for (i in 1:length(replace3)) {
+  temp.OD <- ifelse(substr(replace3[[i]],nchar(replace3[[i]]),nchar(replace3[[i]]))=="e",138,
+                     ifelse(substr(replace3[[i]],nchar(replace3[[i]]),nchar(replace3[[i]]))=="m",162,
+                               186)) #determine appropriate Ordinal Day
+  temp.yr <- substr(replace3[[i]],5,8) #determine year folder to look in
+  file.list[[i]] <- list.files(temp.yr)
+  temp.str <- substr(file.list[[i]],nchar(file.list[[i]])-14, nchar(file.list[[i]])) #isolatre start and end dates from file name
+  file.list[[i]] <- temp.str[which(as.numeric(substr(temp.str,5,7)) <= temp.OD & #find file which spans temp.OD and add index[[i]] to choose appropriate file
+                                                     as.numeric(substr(temp.str,13,15)) >= temp.OD)+index[[i]]] 
+  file.list[[i]] <- list.files(temp.yr)[grep(list.files(temp.yr), pattern = file.list[[i]])] #save appropirate file name
+  file.list[[i]] <- paste0(temp.yr,"/",file.list[[i]],"/",file.list[[i]],".tif") #add directory to file name
+  file.copy(from = file.list[[i]], to = "C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/Temp/replace/") #copy file
+}
+
+#reproject second batch of replacement images with ACI layer as template
+setwd("C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/Temp/replace")
+#import replacement rasters
+replace.raster <- lapply(list.files(),raster)
+#create list of input for multi-core version of projectRaster 
+for (i in 1:length(replace.raster)) {
+  replace.raster[[i]] <- list(from=replace.raster[[i]], to=template, filename=paste0(replace3[[i]],".tif"))
+}
+
+#set up clusters for multi-core processing
+library(parallel)
+cl <- makeCluster(6) #only using 6 cores to minimize RAM bottleneck
+clusterEvalQ(cl,library(raster)) #load package in the cluster
+clusterExport(cl,"replace.raster"); clusterExport(cl,"pR.par") #move required objects to the cluster
+
+#run projectRaster in parallel
+ndvi.replace <- parLapply(cl=cl, X=replace.raster, fun=pR.par)
+stopCluster(cl)
+rm(replace.raster)
+unlink(list.files(pattern="AgExtent")) #delete full NDVI images
+
+#copy final files over to Temp
+file.copy(from=list.files(), to="C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/Temp", overwrite = T)
+
+#delete replace directory
+unlink("C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/Temp/replace", recursive = TRUE)
+
+```

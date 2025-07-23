@@ -1,0 +1,307 @@
+---
+title: "Script1 - ACI covariate preparation"
+author: "Barry Robinson"
+date: "September 12, 2019"
+output: html_document
+---
+
+Download and unzip raw ACI data files
+```{r}
+#Raw files will only be used temporarily, so save to temp directory
+setwd("C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/Temp")
+
+#set years for which you would like to download ACI data. Note that in 2009 and 2010, data was not broken up by province, so must download these years separately from the rest
+years1 <- as.character(2009:2010)
+years2 <- as.character(2011:2019)
+
+
+#Check to make sure the below url is still active and has not changed
+url <- "http://www.agr.gc.ca/atlas/data_donnees/agr/annualCropInventory/tif/"
+library(XML)
+
+#For 2009 and 2010, download all files containing the word "prairies" 
+for (i in years1) {
+  doc <- htmlParse(paste0(url,i,"/"))
+  links <- xpathSApply(doc, "//a/@href")
+  free(doc)
+  wanted <- links[grepl("prairies",links)]
+  GetMe <- paste0(url, i, "/", wanted)
+  lapply(seq_along(GetMe), 
+         function(x) download.file(GetMe[x], wanted[x]))
+}
+
+
+#for all other years, download all files containing ab, sk, or mb.
+for (i in years2) {
+  doc <- htmlParse(paste0(url,i,"/"))
+  links <- xpathSApply(doc, "//a/@href")
+  free(doc)
+  wanted <- links[grepl("ab|mb|sk",links)]
+  GetMe <- paste0(url, i,"/", wanted)
+  lapply(seq_along(GetMe), 
+         function(x) download.file(GetMe[x], wanted[x]))
+}
+
+#unzip all downloaded files and then delete zip files (ensure the temp directory only has .zip files that you're working with) 
+ziplist <- list.files(pattern=".zip")
+lapply(ziplist,unzip)
+lapply(ziplist,unlink)
+```
+
+#Mosaic ACI layers for each province together for each year (required for 2011 onward)
+```{r}
+library(raster)
+library(parallel)
+#loop to run over as many years as desired. Merge takes a long time, so running each year in parallel on different cores
+years2 <- as.character(2011:2019)
+
+#Create list where each element contains all rasters for a given year
+rasterlist <- vector(mode="list", length=length(years2))
+names(rasterlist) <- years2
+for (i in years2) {
+  rasterlist[[i]] <- list.files(pattern = i)
+  rasterlist[[i]] <- lapply(rasterlist[[i]],raster)
+  rasterlist[[i]]$filename <- paste0("aci_",i,".tif")
+  rasterlist[[i]]$fun <- max
+}
+
+#create function that combines do.call() and mosaic() into a single function
+do.mosaic <- function(x) {
+  do.call(raster::mosaic,x)
+}
+
+#set up clusters for multi-core processing
+cl <- makeCluster(length(years2)) #assign a core to each year
+clusterEvalQ(cl,library(raster)) #load package in the cluster
+clusterExport(cl,"rasterlist"); clusterExport(cl,"do.mosaic") #move required objects to the cluster
+aci.list <- parLapply(cl=cl,X=rasterlist,fun=do.mosaic)
+stopCluster(cl)
+rm(rasterlist)
+```
+
+#reclassify each ACI layer to have only basic habitat types
+```{r}
+#First need to reproject 2009 and 2010 rasters to match other years
+#***************UPDATE AND CORRECT THIS SECTION BEFORE RUNNING AGAIN
+#****This step was a mistake. Extent of rasters isn't homogenious from 2011-2018. All rasters should be reprojected to match 2018, not just 2009 and 2010
+#***************
+years <- c(years1,years2)
+#create list where each element contains inputs for projectRaster function
+# reP.list <- vector(mode="list",length=length(years))
+# names(reP.list) <- years
+# for (i in years) {
+#   reP.list[[i]] <- list(from=raster(paste0("aci_", i, "_prairies.tif")), to=aci.list[["2011"]], filename=paste0("aci_",i,".tif"))
+# }
+# 
+# #create function to run projectRaster in parallel
+# rep_par <- function(x) {
+#   require(raster)
+#   projectRaster(from=x$from, to=x$to, filename=x$filename, method="ngb")
+# }
+# 
+# #implement projectRaster in parallel
+# cl <- makeCluster(detectCores() - 1) #assign all cores but 1
+# clusterEvalQ(cl,library(raster)) #load package in the cluster
+# clusterExport(cl,"reP.list"); clusterExport(cl,"rep_par") #move required objects to the cluster
+# temp.list <- parLapply(cl=cl,X=reP.list,fun=rep_par)
+# stopCluster(cl)
+# 
+# 
+# #add 2009 and 2010 rasters to aci.list
+# years <- c(years1,years2)
+# aci.list <- c(temp.list, aci.list)
+names(aci.list) <- years
+# rm(temp.list,reP.list)
+
+#load table with aci habitat classes and define reclass codes
+rcl <- read.csv("Z:/Priority_Areas_Analysis/Data/Covariates/RawData/ACI_Reclass/aci_reclass_R.csv")
+rcl$reclass <- NA
+rcl[which(rcl$code==10),"reclass"] <- 0 #cloud
+rcl[which(rcl$code==20),"reclass"] <- 1 #water
+rcl[which(rcl$code==30),"reclass"] <- 2 #barren
+rcl[which(rcl$code==34|rcl$code==35),"reclass"] <- 3 #developed
+rcl[which(rcl$code==50),"reclass"] <- 7 #shrubland (classifying as grassland)
+rcl[which(rcl$code==80),"reclass"] <- 6 #wetland
+rcl[which(rcl$code==110),"reclass"] <- 7 #grassland
+rcl[which(rcl$code==120),"reclass"] <- 8 #cropland
+rcl[which(rcl$code==122),"reclass"] <- 7 #pasture/forage (classifying as grassland)
+rcl[which(rcl$code>=130 & rcl$code<=199),"reclass"] <- 8 #cropland
+rcl[which(rcl$code>=200 & rcl$code<=230),"reclass"] <- 9 #forest
+
+rcl <- data.matrix(rcl[,2:3])
+colnames(rcl) <- c("is","becomes")
+
+#add new peatland class (85) to table. Peatlands will be classified as wetlands (6)
+rcl <- rbind(rcl, c(85,6))
+
+#create a list of lists where each element contains inputs for relcassy function for each year
+reclass.list <- vector(mode="list", length=length(years))
+names(reclass.list) <- years
+for (i in years) {
+  reclass.list[[i]] <- list(raster=aci.list[[i]], rcl=rcl, filename=paste0("aciReclass_",i,".tif"))
+}
+
+#define reclass function for multi-core processing 
+reclass.par <- function(x) {
+  require(raster)
+  reclassify(x=x$raster, rcl=x$rcl, filename=x$filename)
+}
+
+#set up clusters for multi-core processing
+cl <- makeCluster(length(years)) #assign a cluster for each year
+clusterEvalQ(cl,library(raster)) #load package in the cluster
+clusterExport(cl,"reclass.list"); clusterExport(cl,"reclass.par") #move required objects to the cluster
+
+#run reclassify in parallel
+aci.reclass <- parLapply(cl=cl, X=reclass.list, fun=reclass.par)
+stopCluster(cl)
+rm(aci.list, reclass.list)
+```
+
+#Change resolution of all ACI raster to 800x800m using projectRaster
+```{r}
+#create a list of lists where each element contains inputs for projectRaster function for each year
+m800.list <- vector(mode="list", length=length(years))
+names(m800.list) <- years
+for (i in years) {
+  m800.list[[i]] <- list(from=aci.reclass[[i]], res=c(800,800), filename=paste0("aci800m_",i,".tif"))
+}
+
+#define projectRaster function for multi-core processing 
+pR.par <- function(x) {
+  require(raster)
+  projectRaster(from=x$from, res=x$res, crs=crs(x$from), method="ngb", filename=x$filename)
+}
+
+#set up clusters for multi-core processing
+cl <- makeCluster(length(years)) #assign a cluster for each year
+clusterEvalQ(cl,library(raster)) #load package in the cluster
+clusterExport(cl,"m800.list"); clusterExport(cl,"pR.par") #move required objects to the cluster
+
+#run reclassify in parallel
+aci.800m <- parLapply(cl=cl, X=m800.list, fun=pR.par)
+stopCluster(cl)
+rm(m800.list,aci.reclass)
+```
+
+#Reclass each ACI again to have separate rasters for each habitat type and year
+```{r}
+#create reclass tables for each habitat type and combine into a list
+# rcl.shrub <- c(0,0, 1,0, 2,0, 3,0, 5,1, 6,0, 7,0, 8,0, 9,0)
+# rcl.shrub <- matrix(rcl.shrub, ncol=2, byrow=T)
+
+rcl.grass <- c(0,0, 1,0, 2,0, 3,0, 5,0, 6,0, 7,1, 8,0, 9,0)
+rcl.grass <- matrix(rcl.grass, ncol=2, byrow=T)
+
+rcl.crop <- c(0,0, 1,0, 2,0, 3,0, 5,0, 6,0, 7,0, 8,1, 9,0)
+rcl.crop <- matrix(rcl.crop, ncol=2, byrow=T)
+
+rcl.forest <- c(0,0, 1,0, 2,0, 3,0, 5,0, 6,0, 7,0, 8,0, 9,1)
+rcl.forest <- matrix(rcl.forest, ncol=2, byrow=T)
+
+#rcl.list <-list(shrub=rcl.shrub, grass=rcl.grass, crop=rcl.crop, forest=rcl.forest)
+rcl.list <-list(shrub=rcl.shrub, grass=rcl.grass, crop=rcl.crop, forest=rcl.forest)
+
+#habitat <- c("shrub", "grass", "crop", "forest")
+habitat <- c("grass", "crop", "forest")
+names(rcl.list) <- habitat
+
+#create list with an element for each yearXhabitat intersection. Each element will be a list containing appropriate aci raster, rcl table, and filename
+year.habitat <- vector(mode="list",length=length(years)*length(habitat))
+count=1
+for (i in years) {
+  for (j in habitat) {
+    year.habitat[[count]] <- list(raster=aci.800m[[i]], rcl=rcl.list[[j]], filename=paste0(j,i,".tif"))
+    count <- count + 1
+  }
+}
+
+#set up clusters for multi-core processing
+cl <- makeCluster(detectCores() - 1) #there are 40 elements in the list, so assign all available cores (19)
+clusterEvalQ(cl,library(raster)) #load package in the cluster
+clusterExport(cl,"year.habitat"); clusterExport(cl,"reclass.par") #move required objects to the cluster
+
+#run reclassify in parallel
+aci.habitat <- parLapply(cl=cl, X=year.habitat, fun=reclass.par)
+stopCluster(cl)
+rm(year.habitat)
+```
+
+#Calculate zonal statistics for each habitat type: number of pixels of each habitat type in 2 roving windows: 3x3 pixels and 5x5
+```{r}
+#create matrices to represent the roving windows: 3x3 pixels (9 pixels) and 5x5 (25 pixels)
+scale <- c("9","25")
+w <- list(matrix(1,3,3), matrix(1,5,5))
+names(w) <- scale
+#create a list with an element for each yearXhabitatXscale intersection; each element with be a list containing the appropirate aci raster layer, roving window matrix, and filename
+yr.hab.scale <- vector(mode="list",length=length(aci.habitat)*length(scale))
+count=1
+for (i in 1:length(aci.habitat)) {
+  for (j in scale) {
+    yr.hab.scale[[count]] <- list(raster=aci.habitat[[i]], w=w[[j]], filename=paste0(names(aci.habitat[[i]]), "_", j, ".tif"))
+    count <- count + 1
+  }
+}
+
+#define focal function for multi-core processing
+focal.par <- function(x) {
+  require(raster)
+  focal(x=x$raster, w=x$w, filename=x$filename)
+}
+
+#set up clusters for multi-core processing
+cl <- makeCluster(detectCores() - 1) #there are 80 elements in the list, so assign all available cores (19)
+clusterEvalQ(cl,library(raster)) #load package in the cluster
+clusterExport(cl,"yr.hab.scale"); clusterExport(cl,"focal.par") #move required objects to the cluster
+
+#run reclassify in parallel
+habitat.scale <- parLapply(cl=cl, X=yr.hab.scale, fun=focal.par)
+stopCluster(cl)
+rm(yr.hab.scale)
+```
+
+#Reproject all ACI rasters to have same extent as 2018 (earlier versions of ACI had slightly different extent)
+#This section of the code was created after completing the above, so rasters need to be imported from the local drive. I cut rasters from the Data/GIS/Rasters folder, to the Data/Temp folder, so that reprojected rasters can be saved in correct Raster folder
+```{r}
+#if running this entire code from the begining with raw ACI layers, skip the next 3 lines of code
+setwd("C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/Temp")
+file.list <- list.files(pattern = "grass|crop|forest")
+names(file.list) <- file.list
+habitat.scale <- lapply(file.list,raster)
+names(habitat.scale) <- file.list
+
+#create list of lists with inputs needed for projectRaster function 
+reP.list <- vector(mode="list",length=length(habitat.scale))
+names(reP.list) <- file.list
+for (i in file.list) {
+  reP.list[[i]] <- list(from=habitat.scale[[i]], to=habitat.scale[["grass2019.tif"]], filename=file.list[[i]])
+}
+
+rep_par <- function(x) {
+  require(raster)
+  projectRaster(from=x$from, to=x$to, filename=x$filename, method="ngb")
+}
+
+setwd("C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/GIS/Rasters/BRT_covariates/ACI")
+
+#implement projectRaster in parallel
+cl <- makeCluster(detectCores() - 1) #assign all cores but 1
+clusterEvalQ(cl,library(raster)) #load package in the cluster
+clusterExport(cl,"reP.list"); clusterExport(cl,"rep_par") #move required objects to the cluster
+temp.list <- parLapply(cl=cl,X=reP.list,fun=rep_par)
+stopCluster(cl)
+
+```
+
+
+#Ensure to move final raster products to C:\Users\robinsonba\Documents\Projects\Priority Areas Analysis\Data\GIS\Rasters\BRT_covariates 
+```{r}
+#all ACI habitat rasters should be kept on local drive for subsequent analysis:
+  #10 years X 4 habitats x 3 scales = 120 raster files
+
+#the 30x30 m and 800x800 m reclassified ACI rasters will not be used in subsequent analysis, so can be moved to Priority Areas Analysis folder on InGeo
+
+#individual provincial ACI layers and the mosaiced ACI layer with original classification can all be deleted (these are stored online by Ag Canada)
+```
+
+

@@ -1,0 +1,81 @@
+---
+title: "Script3 - DEM covariate preparation"
+author: "Barry Robinson"
+date: "September 18, 2019"
+output: html_document
+---
+
+#Download DEM layer, reproject using an ACI layer as the template
+```{r}
+library(raster)
+setwd("C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/Temp")
+#download DEM and load into workspace
+file.copy(from = "Y:/gdr/NON_EC_DATA/006-elevation/CA/CombinedDEM/DEM_250m_LCC_CTI_Geo.tif", to = getwd())
+dem <- raster("DEM_250m_LCC_CTI_Geo.tif")
+
+#reproject dem using ACi layer as template
+template <- raster("C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/GIS/Rasters/BRT_covariates/ACI/grass2018.tif")
+dem <- projectRaster(from = dem, to = template, filename = "dem.tif")
+
+#remove negative values
+dem[dem[]<0] <- NA
+plot(dem)
+
+#save new dem
+writeRaster(dem, filename = "dem.tiff",overwrite=T)
+```
+
+#Calculate mean and SD of dem in 2 roving windows: 3x3 pixels and 5x5
+```{r}
+#create matrices to represent the roving windows: 3x3 pixels (9 pixels) and 5x5 (25 pixels)
+scale <- c("9","25")
+w <- list(matrix(1,3,3), matrix(1,5,5))
+names(w) <- scale
+metric <- c(mean, sd)
+names(metric) <- c("mean","sd")
+#create a list with an element for each metric (mean or SD) and scale intersection; each element with be a list containing the appropirate roving window matrix, function, and filename
+metric.scale <- vector(mode="list",length=length(metric)*length(scale))
+count=1
+for (i in names(metric)) {
+  for (j in scale) {
+    metric.scale[[count]] <- list(raster=dem, w=w[[j]], fun=metric[[i]], filename=paste0("dem", "_", i, j, ".tif"))
+    count <- count + 1
+  }
+}
+
+#define focal function for multi-core processing
+focal.par <- function(x) {
+  require(raster)
+  focal(x=x$raster, w=x$w, fun=x$fun, filename=x$filename)
+}
+
+#set up clusters for multi-core processing
+library(parallel)
+cl <- makeCluster(length(metric.scale)) #assign core to each element in metric.scal
+clusterEvalQ(cl,library(raster)) #load package in the cluster
+clusterExport(cl,"metric.scale"); clusterExport(cl,"focal.par") #move required objects to the cluster
+
+#run reclassify in parallel
+dem.metrics <- parLapply(cl=cl, X=metric.scale, fun=focal.par)
+stopCluster(cl)
+rm(metric.scale)
+```
+
+#import new rasters, plot, move to appropriate directory, delete Temp files
+```{r}
+dem_mean9 <- raster("dem_mean9.tif")
+plot(dem_mean9)
+
+dem_mean25 <- raster("dem_mean25.tif")
+plot(dem_mean25)
+
+dem_sd9 <- raster("dem_sd9.tif")
+plot(dem_sd9)
+
+dem_sd25 <- raster("dem_sd25.tif")
+plot(dem_sd25)
+
+file.copy(from=list.files(pattern="dem"), to="C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/GIS/Rasters/BRT_covariates/DEM")
+unlink(list.files())
+```
+

@@ -1,0 +1,42 @@
+---
+title: "Script 6 - Create weight raster based on density of point count locations"
+author: "Barry Robinson"
+date: "October 25, 2019"
+output: html_document
+---
+
+#Create weight raster based on inverse of the total number of point count locations in 24.8 x 24.8 km grid cells (31x31 pixels)
+```{r}
+#load PKEY_XY, which contains coordinates associated with all surveys (PKEYs), and subset necessary columns
+XY <- read.csv("C:/Users/robinsonba/Dropbox/GRASS/Data/PKEY_XY.csv")
+XY <- subset(XY, select=c(PKEY,YYYY,X,Y))
+
+#load PKEY_model, which specifies all PEKYs to be used in density modelling, and use it to subset PKEY_XY
+load("C:/Users/robinsonba/Dropbox/GRASS/Analysis/BRT_Input/PKEY_model.rda")
+XY <- XY[XY$PKEY %in% PKEY.model,]
+
+#create list of XY locations with an element for each year
+xy.list <- vector(mode="list", length=length(years))
+names(xy.list) <- years
+
+#create list of sampling weight rasters with an element for each year
+wtRaster.list <- vector(mode="list", length=length(years))
+names(wtRaster.list) <- years
+
+template <- raster("C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/GIS/Rasters/ACI/grass2018.tif")
+#populate xy.list and wtRaster list and export weight rasters
+for (i in years) {
+  #create SpatialPoints object with point count locations in each year
+  xy.list[[i]] <- SpatialPoints(XY[XY$YYYY==as.numeric(i),c("X","Y")],proj4string=CRS("+proj=longlat +datum=WGS84 +no_defs"))
+  #reproject
+  xy.list[[i]] <- spTransform(xy.list[[i]],crs(template))
+  #count number of point counts in each cell for each year
+  wtRaster.list[[i]] <- rasterize(xy.list[[i]],template, fun='count')
+  #count number of point counts in each 31x31 pixel roving window for each year
+  wtRaster.list[[i]] <- focal(wtRaster.list[[i]],w=matrix(1,31,31),na.rm=T)
+  #calculate weight as inverse (higher weight for point counts in more sparsely sampled pixels)
+  wtRaster.list[[i]] <- 1/wtRaster.list[[i]]
+  #export raster
+  writeRaster(wtRaster.list[[i]], filename=paste0("SampleWeight/wt",i,".tif"))
+}
+```

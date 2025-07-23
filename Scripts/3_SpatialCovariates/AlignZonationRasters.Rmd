@@ -1,0 +1,286 @@
+---
+title: "Align Zonation Input Rasters"
+author: "Barry Rboinson"
+date: "January 9, 2019"
+output: html_document
+---
+#Note the first 4 code chunks are in a sequence and should be run together once the raw version of all Zonation input rasters have been produced/acquired. The code below that doesn't necessarily run in a sequence; each code chunk represents a process that may need to be preformed in order to ensure each input Raster layer for Zonation are alligned with the same projection, extent, and cell size. Only run code chucks needed for particular step being worked on.
+
+#Setup workspace and load data.
+```{r}
+#ensure all models (landbird, marshbird, and waterfowl) are transfered into the temp folder below, with each in a separate subfolder
+setwd("C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/Temp/Zonation")
+library(raster)
+
+#import marshbird and duck models
+fileList <- list.files(recursive = T, full.names = T, pattern =".tif")
+rasterList <- lapply(fileList, raster)
+
+#assign raster names to objects in rasterList
+rasterNames <- unlist(lapply(rasterList, names)) 
+names(rasterList) <- rasterNames
+
+#add filename to rasterList
+for (i in 1:length(rasterList)) {
+  rasterList[[i]] <- list(raster=rasterList[[i]], file=fileList[[i]])
+}
+
+#separate out landbird models into a separate list
+landbirds <- rasterList[grep("Landbirds", fileList)]
+rasterList <- rasterList[!(grepl("Landbirds", fileList))]
+```
+
+#reproject and allign all non-landbird rasters to match landbird models. 
+```{r}
+#assign a landbird model to use as the reprojection template
+template <- landbirds[[1]]$raster
+
+#define function for projectRaster and extend in parallel
+pR.par <- function(x) {
+  require(raster)
+  setwd("C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/Zonation/Scenarios2.0/input_layers")
+  #Check if raster is categorical (<=3 pixel values) or continous to apply appropriate reprojection method 
+  if(length(unique(x$raster))<=3) {method="ngb"} else {method = "bilinear"}
+  temp = projectRaster(from=x$raster, to=template, method=method)
+  temp = extend(x=temp, y=template)
+  temp = crop(x=temp, y=template)
+  writeRaster(temp, filename = x$file, overwrite =T)
+  temp = raster(x$file)
+  return(temp)
+}
+
+#set up clusters for multi-core processing
+library(parallel)
+cl <- makeCluster(min(length(rasterList),detectCores()-1)) 
+clusterEvalQ(cl,library(raster)) #load package in the cluster
+clusterExport(cl,"rasterList"); clusterExport(cl,"pR.par"); clusterExport(cl,"template") #move required objects to the cluster
+
+#run reclassify in parallel
+rasterList <- parLapply(cl=cl, X=rasterList, fun=pR.par)
+stopCluster(cl)
+```
+
+Change NA pixel where appropriate. NA values in landbird models will become 0 for pixel with non-zero values in the marshbird models (primarily larger lakes). 
+```{r}
+#change template to a marshbird model
+template = rasterList[[which(names(rasterList)=="ambi_occu")]]
+
+#define function to change large lake pixels to 0 in landbirds models
+naLand <- function(x) {
+  setwd("C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/Zonation/Scenarios2.0/input_layers")
+  require(raster)
+  x$raster[(is.na(x$raster[])&!is.na(template[]))] <- 0
+  writeRaster(x$raster, filename = x$file)
+  temp = raster(x$file)
+  return(temp)
+}
+
+#set up clusters for multi-core processing
+library(parallel)
+cl <- makeCluster(min(length(landbirds),detectCores()-1)) 
+clusterEvalQ(cl,library(raster)) #load package in the cluster
+clusterExport(cl,"landbirds"); clusterExport(cl,"naLand"); clusterExport(cl,"template") #move required objects to the cluster
+
+#run reclassify in parallel
+landbirds <- parLapply(cl=cl, X=landbirds, fun=naLand)
+stopCluster(cl)
+```
+
+Now any pixels with NA values in the landbird models will become NA in the marshbird and waterfowl models (waterfowl models have slightly larger extent, so edges need to be removed). Its critical that pixels within large lakes are changed to 0 in the landbird models first (run chunk above), so that these pixels are not changed to NA for the marshbird and waterfowl models.
+```{r}
+#add filenames back to rasterList
+fileList <- fileList[!(grepl("Landbirds", fileList))]
+for (i in 1:length(rasterList)) {
+  rasterList[[i]] <- list(raster=rasterList[[i]], file=fileList[[i]])
+}
+
+#change template back to landbird model
+template = landbirds[[1]]
+
+#define function to change pixels with NA values in the landbird models to NA in the marshbird and waterfowl models
+naOther <- function(x) {
+  setwd("C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/Zonation/Scenarios2.0/input_layers")
+  require(raster)
+  x$raster[is.na(template)] <- NA
+  writeRaster(x$raster, filename = x$file, overwrite = T)
+  temp = raster(x$file)
+}
+
+#set up clusters for multi-core processing
+library(parallel)
+cl <- makeCluster(min(length(rasterList),detectCores()-1)) 
+clusterEvalQ(cl,library(raster)) #load package in the cluster
+clusterExport(cl,"rasterList"); clusterExport(cl,"naOther"); clusterExport(cl,"template") #move required objects to the cluster
+
+#run reclassify in parallel
+rasterList <- parLapply(cl=cl, X=rasterList, fun=naOther)
+stopCluster(cl)
+```
+
+
+#Copy newest BRT landbird models of interest to the Zonation input folder
+```{r}
+#setwd to folder with final BRT models
+setwd("C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/Results/BRT_rasters_final")
+
+#list species of interest
+species <- c("BAIS", "BOBO", "BRSP", "CCLO", "CCSP", "GRSP", "HOLA", "LARB" ,"LBCU", "MAGO", "MCLO", "SAVS", "SPPI", "UPSA", "VESP", "WEME", "WILL")
+
+#list all rasters needed and import
+rasterList <- list.files(pattern = paste(species, collapse="|")) #query our species of interest
+rasterList <- rasterList[grepl("_50", rasterList)] #query out only the 50% quantile
+file.copy(from = rasterList, to = paste0("C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/Zonation/Scenarios2.0/input_layers/Landbirds/", rasterList))
+```
+
+#Copy newest BRT marshbird models of interest to the Zonation input folder
+```{r}
+#setwd to folder with final BRT models
+setwd("C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/Results/BRT_rasters_final")
+
+#list species of interest
+species <- c("KILL", "RWBL", "SEWR", "WIPH", "WISN", "YHBL")
+
+#list all rasters needed and import
+rasterList <- list.files(pattern = paste(species, collapse="|")) #query our species of interest
+rasterList <- rasterList[grepl("_50", rasterList)] #query out only the 50% quantile
+file.copy(from = rasterList, to = paste0("C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/Zonation/Scenarios2.0/input_layers/Marshbirds/", rasterList))
+```
+
+#use this chunk if lapply doesn't properly load rasters on line 16 above 
+```{r}
+for (i in rasterNames) {
+  rasterList[[i]] <- raster(paste0(i,".tif"))
+}
+```
+
+#Change NA pixels to match template
+```{r}
+#change pixel with vales 0 to NA where appropriate based on template
+for (i in rasterNames) {
+  rasterAlign[[i]] <- overlay(rasterAlign[[i]], template, fun = function(x,y) {
+    x[is.na(y[])] <- NA
+    return(x)
+  })
+}
+
+#change NA values to 0 where appropriate based on template
+for (i in rasterNames) {
+  rasterAlign[[i]] <- overlay(rasterAlign[[i]], template, fun = function(x,y) {
+    x[(is.na(x[])&!is.na(y[]))]<-0
+    return(x)
+  }, file=paste0("W:/Priority_Areas_Analysis/Analysis/Zonation/InputRasters/",i,".tif"),format = "GTiff", overwrite=TRUE)
+}
+```
+
+#Marshbird models - change 0.5 to NoData
+```{r}
+#import marshbird
+setwd("W:/Priority_Areas_Analysis/Analysis/Zonation/InputRasters/Marshbirds")
+rasterList <- list.files(path="W:/Priority_Areas_Analysis/Analysis/Zonation/InputRasters/Marshbirds",pattern =".tif$")
+rasterList <-lapply(rasterList, raster)
+
+#assign raster names to objects in rasterList
+rasterNames <- unlist(lapply(rasterList, names)) 
+names(rasterList) <- rasterNames
+
+#
+
+for (i in rasterNames) {
+  rasterList[[i]][rasterList[[i]][]>0.499999 & rasterList[[i]][]<0.5000001] <- NA
+  writeRaster(rasterList[[i]], filename = paste0("W:/Priority_Areas_Analysis/Analysis/Zonation/InputRasters/",i,".tif"),
+              format = "GTiff", overwrite=TRUE)
+}
+
+for (i in rasterNames) {
+  writeRaster(rasterList[[i]], filename = paste0("W:/Priority_Areas_Analysis/Analysis/Zonation/InputRasters/Marshbirds",i,".tif"),format = "GTiff", overwrite=TRUE)
+}
+
+```
+
+
+#Update IBA to be 0 and 1 (currently its 1 and NoData)
+```{r}
+IBA <- raster("W:/Priority_Areas_Analysis/Analysis/Zonation/InputRasters/IBA.tif")
+
+IBA[is.na(IBA[])] <- 0
+plot(IBA)
+writeRaster(IBA,file="W:/Priority_Areas_Analysis/Analysis/Zonation/InputRasters/IBA.tif", overwrite=TRUE)
+```
+
+#Duck models - change negative values to NoData
+```{r}
+setwd("W:/Priority_Areas_Analysis/Analysis/Zonation/InputRasters/Waterfowl")
+library(raster)
+memory.limit(size=200000)
+
+#import marshbird and duck models
+rasterList <- list.files(path="W:/Priority_Areas_Analysis/Analysis/Zonation/InputRasters/Waterfowl",pattern =".tif$")
+rasterList <-lapply(rasterList, raster)
+
+#assign raster names to objects in rasterList
+rasterNames <- unlist(lapply(rasterList, names)) 
+names(rasterList) <- rasterNames
+
+#change negative values to 0 for all duck models
+for (i in rasterNames) {
+  rasterList[[i]][rasterList[[i]][]<0] <- 0
+  writeRaster(rasterList[[i]], filename = paste0("W:/Priority_Areas_Analysis/Analysis/Zonation/InputRasters/Waterfowl/",i,".tif"),
+              format = "GTiff", overwrite=TRUE)
+}
+
+```
+
+#PHJV Target Landscapes
+```{r}
+TL<-raster("W:/Priority_Areas_Analysis/Data/PHJV/PHJV_TL.tif")
+TL_<-projectRaster(from = TL, to = template, method="ngb",
+              file="W:/Priority_Areas_Analysis/Analysis/Zonation/InputRasters/PHJV_TL.tif")
+TL_[TL_==255] <- 0
+writeRaster(TL_,file="W:/Priority_Areas_Analysis/Analysis/Zonation/InputRasters/PHJV_TL.tif",overwrite=TRUE)
+```
+
+#Grassland Conversion Risk
+```{r}
+#Need to change non-grassland pixels to 0
+risk <- raster("W:/Priority_Areas_Analysis/Analysis/Zonation/InputRaster/Risk/convrisk.tif")
+grass <- raster("W:/Priority_Areas_Analysis/Temp/grass2016.tif")
+grass <- projectRaster(from = grass, to = risk, method="ngb")
+plot(grass)
+risk <- risk*grass
+writeRaster(risk, file="W:/Priority_Areas_Analysis/Analysis/Zonation/InputRaster/Risk/convrisk.tif", overwrite=TRUE)
+```
+
+#Buffer protected areas by 2km
+```{r}
+PA <- raster("W:/Priority_Areas_Analysis/Analysis/Temp/ProtectedAreas/PA_buff.tif") #buffered the PA ploygon and converted to raster in ArcMap
+#reproject raster to template
+PA <- projectRaster(from = PA, to = template, method ="ngb")
+
+#create new buffer layers and change all pixels outside the buffers to be 2 or 5 (2x or 5x cost to conserve)
+PA_buff2 <- PA_buff
+PA_buff2[is.na(PA_buff2)] <- 2
+PA_buff5 <- PA_buff
+PA_buff5[is.na(PA_buff5)] <- 5
+writeRaster(PA_buff2,file="W:/Priority_Areas_Analysis/Analysis/Zonation/InputRasters/ProtectedAreas/PA_buff2.tif")
+writeRaster(PA_buff5,file="W:/Priority_Areas_Analysis/Analysis/Zonation/InputRasters/ProtectedAreas/PA_buff5.tif")
+```
+
+#Copy newest BRT landbird models of interest to the Zonation input folder
+```{r}
+#setwd to folder with final BRT models
+setwd("C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/Results/BRT_rasters_final")
+
+#list species of interest
+species <- c("BAIS", "BOBO", "BRSP", "CCLO", "CCSP", "GRSP", "HOLA", "LARB", "LCSP", "LBCU", "MAGO", "MCLO", "SAVS", "SPPI", "UPSA", "VESP", "WEME", "WILL")
+
+#list all rasters needed and import
+rasterList <- list.files(pattern = paste(species, collapse="|")) #query our species of interest
+rasterList <- rasterList[grepl("_50", rasterList)] #query out only the 50% quantile
+rasterList <- lapply(rasterList, raster)
+
+#load protected areas raster as template for cropping
+setwd("C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/Zonation/Scenarios2.0/input_layers/")
+template = raster("ProtectedAreas/PA_All.tif")
+cropList <- lapply(rasterList, FUN = function(x) {return(crop(x=x, y=template, filename = paste0("Landbirds/", names(x), ".tif")))})
+```
+

@@ -1,0 +1,79 @@
+---
+title: "Script 4 - Wetland area and count covariate preparation"
+author: "Barry Robinson"
+date: "September 19, 2019"
+output: html_document
+---
+
+#Download wetland layers, reproject using an ACI layer as the template
+```{r}
+library(raster)
+setwd("C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/Temp")
+#download wetland layers and load into workspace
+file.copy(from = list.files("Z:/Priority_Areas_Analysis/Data/Covariates/RawData/Wetland", pattern=".tif"), to = getwd())
+ba <- raster("basin_area.tif")
+plot(ba)
+bc <- raster("basin_count.tif")
+plot(bc)
+
+#reproject both layers using ACi layer as template
+template <- raster("C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/GIS/Rasters/BRT_covariates/ACI/grass2018.tif")
+ba <- projectRaster(from = ba, to = template, filename = "ba.tif", overwrite = T)
+bc <- projectRaster(from = bc, to = template, filename = "bc.tif", overwrite = T)
+```
+
+Calculate mean basin area and mean basin count in 2 roving windows: 3x3 pixels and 5x5
+```{r}
+#create matrices to represent the roving windows: 3x3 pixels (9 pixels) and 5x5 (25 pixels)
+scale <- c("9","25")
+w <- list(matrix(1,3,3), matrix(1,5,5))
+names(w) <- scale
+metric <- c("ba","bc")
+names(metric) <- metric
+#create a list with an element for each metric (count or area) and scale intersection; each element with be a list containing the appropirate raster, roving window matrix, and filename
+metric.scale <- vector(mode="list",length=length(metric)*length(scale))
+count=1
+for (i in names(metric)) {
+  for (j in scale) {
+    metric.scale[[count]] <- list(raster=get(i), w=w[[j]], filename=paste0(i, "_", j, ".tif"))
+    count <- count + 1
+  }
+}
+
+#define focal function for multi-core processing
+focal.par <- function(x) {
+  require(raster)
+  focal(x=x$raster, w=x$w, fun=mean, filename=x$filename)
+}
+
+#set up clusters for multi-core processing
+library(parallel)
+cl <- makeCluster(length(metric.scale)) #assign core to each element in metric.scal
+clusterEvalQ(cl,library(raster)) #load package in the cluster
+clusterExport(cl,"metric.scale"); clusterExport(cl,"focal.par") #move required objects to the cluster
+
+#run reclassify in parallel
+wetland.metrics <- parLapply(cl=cl, X=metric.scale, fun=focal.par)
+stopCluster(cl)
+rm(metric.scale)
+```
+
+#import new rasters, plot, move to appropriate directory, delete Temp files
+```{r}
+ba9 <- raster("ba_9.tif")
+plot(ba9)
+
+ba25 <- raster("ba_25.tif")
+plot(ba25)
+
+bc9 <- raster("bc_9.tif")
+plot(bc9)
+
+bc25 <- raster("bc_25.tif")
+plot(bc25)
+
+file.copy(from=list.files(pattern="ba_|ba[.]|bc_|bc[.]"), 
+          to="C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/GIS/Rasters/BRT_covariates/Wetland")
+unlink(list.files())
+```
+
