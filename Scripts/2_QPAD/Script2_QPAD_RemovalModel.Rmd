@@ -1,0 +1,217 @@
+---
+title: "QPAD - REMOVAL MODEL"
+author: "Barry Robinson"
+date: "October 15, 2018"
+output: html_document
+---
+
+#Set-up Workspace and load data
+```{r setup}
+#setwd("C:/Users/becke/Dropbox/Canadian Wildlife Service/Unit_Terrestrial/Robinson_GrasslandBirds/GRASS")
+setwd("C:/Users/robinsonba/Dropbox/GRASS")
+
+library(detect)
+library(plyr)
+library(data.table)
+library(parallel)
+
+design <- read.csv("Data/Design_DurationRemovalSampling.csv") #Design matrix for each duration methods (Access query)
+counts <- read.csv("Data/DurCountMatrix.csv") #Count data organized into duration matrix for removal sampling (Access query)
+PKEY_TSSR <- read.csv("Data/PKEY_TSSR.csv") #PKEY table with JDAY and TSSR added (from Script1)
+```
+
+#check for missing interval columns in the counts table (some interval columns may not be present if no observations) and add them
+```{r}
+#Counts table may not contain all of the interval columns in design because some intervals may not have any data. Check column names & missing columns
+colnames(design)
+colnames(counts)
+
+#determine which interval columns are missing from count
+misInt <- setdiff(grep("X",colnames(design), value=T),grep("X",colnames(counts),value=T))
+
+#add missing columns to counts table
+if(length(misInt)>0) {
+  for (i in 1:length(misInt)) {
+    counts[,misInt[[i]]] <- NA
+    }
+}
+
+#reorder and rename interval columns
+intcols <- grep("X",colnames(counts), value=T) #extract interval column names
+intcols <- intcols[order(as.numeric(gsub("\\D", "",intcols)))] #put in numeric order
+counts <- counts[,c(colnames(counts)[!(colnames(counts) %in% intcols)],intcols)] #apply order to counts table
+
+#Change column names so that they are different across counts and design table
+newnamesD <- paste0(rep("Interval",times=length(intcols)), 1:length(intcols))
+setnames(design,old=intcols,new=newnamesD)
+
+newnamesC <- paste0(rep("Int",times=length(intcols)), 1:length(intcols))
+setnames(counts,old=intcols,new=newnamesC)
+
+#check that colnames are correct
+colnames(design)
+colnames(counts)
+
+rm(i,intcols,misInt)
+```
+
+#Join design and count tables based on DURMETH
+```{r}
+CntDsn <- plyr::join(counts, design, by = "DURMETH", type="left")
+
+#check for NAs (should be NAs only in int and interval columns)
+apply(CntDsn,2,function(x)any(is.na(x)))
+
+#Subset data that has >=2 intervals
+table(CntDsn$DURMETH) #see how many of each DURMETH are present
+
+remove <- design$DURMETH[which(is.na(design$Interval2))] #list DURMETH with only 1 interval
+CntDsn <- CntDsn[!CntDsn$DURMETH %in% remove,]
+
+table(CntDsn$DURMETH) #double check that samples were removed
+```
+
+#Change NAs in count table to 0s, where appropriate based on design table
+```{r}
+#Separate counts and designs into separate dataframes
+counts   <- CntDsn[,c("PKEY","SPPCODE","DURMETH",newnamesC)]
+designPC <- CntDsn[,c("PKEY","SPPCODE","DURMETH",newnamesD)]
+
+#Rename interval columns in design to match counts (now that they are separated)
+setnames(designPC,old=newnamesD,new=newnamesC)
+
+#Loop across interval columns to change NAs in count table to 0's where appropriate based on design table
+for (i in newnamesC) {
+  counts[which(is.na(counts[,i])),i] <- ifelse(!is.na(designPC[is.na(counts[,i]),i]), 0, NA)
+}
+
+#Remove all unneccessary interval columns with only NAs from count and design tables
+for (i in newnamesC) {
+  if (all(is.na(counts[,i]))) {counts[,i]<-NULL}
+  if (all(is.na(designPC[,i]))) {design[,i]<-NULL}
+}
+```
+
+#Join the count data with TSSR and JDAY covariates (from Script 1) by PKEY
+```{r}
+covars <- join(counts, PKEY_TSSR, by="PKEY", type="left", match="all")
+
+#Check for NAs
+apply(covars, 2, function(x) any(is.na(x)))
+
+#Ensure that order of PKEYS in counts, designPC, and covars all match up
+any(is.na(ifelse(counts$PKEY==designPC$PKEY,TRUE,FALSE))) #if FALSE, all PKEY values match
+any(is.na(ifelse(counts$PKEY==covars$PKEY,TRUE,FALSE))) #if FALSE, all PKEY values match
+```
+
+#Query out count, design, and covar data for each spp & create matrices needed for removal sampling
+```{r}
+#create list of species in counts table
+species <- sort(as.character(unique(counts$SPPCODE)))
+
+#extract data for each species with >= 50 observations
+for (i in species) {
+  if(nrow(counts[counts$SPPCODE==i,])>=50) {
+    assign(paste0("Y_",i), as.matrix(counts[counts$SPPCODE==i,newnamesC]))
+    assign(paste0("D_",i), as.matrix(designPC[designPC$SPPCODE==i,newnamesC]))
+    assign(paste0("C_",i), subset(covars,SPPCODE==i,select = c(TSSR:JDAY)))
+  } else {species <- species[!(species %in% i)]}
+}
+```
+
+
+#Models - cmulti: implement suite of candidate models for removal sampling
+The left hand side of the formula reads as count | design where count is a matrix with cell counts, design is the matrix describing the interval endpoints for the cells; right hand side of the formula are the covars; type="rem" stands for removal sampling
+#m1 - Null model; the right hand side is 1 because we use a constant model
+#m2 - TSSR Model
+#m3 - JDAY model
+#m4 - TSSR+JDAY
+#m5 - TSSR*JDAY
+#M6 - TSSR^2
+```{r}
+#Create function to implement all candidate models for removal sampling using cmulti function in parralel
+multiMulti <- function(x) {
+  require(detect)
+  m1 = cmulti(x$Y | x$D ~ 1, type="rem")
+  m2 = cmulti(x$Y | x$D ~ x$C$TSSR, type="rem")
+  m3 = cmulti(x$Y | x$D ~ x$C$JDAY, type="rem")
+  m4 = cmulti(x$Y | x$D ~ x$C$TSSR + x$C$JDAY, type="rem")
+  m5 = cmulti(x$Y | x$D ~ x$C$TSSR * x$C$JDAY, type="rem")
+  m6 = cmulti(x$Y | x$D ~ x$C$TSSR2, type="rem")
+  return(list(m1,m2,m3,m4,m5,m6))
+}
+
+#create list of lists contaning count and design matrices and covariates for each species; this will be used as inputs into the removal models
+input.list <- vector(mode="list", length=length(species))
+names(input.list) <- species
+for (i in species) {
+  input.list[[i]] <- list(Y=get(paste0("Y_",i)), D=get(paste0("D_",i)), C=get(paste0("C_",i)))
+}
+
+#set up clusters for multi-core processing and parameterize model across all species simultaeously
+cl <- makeCluster(detectCores()-1) #all cores - 1
+clusterEvalQ(cl,library(detect)) #load package in the cluster
+clusterExport(cl,"input.list"); clusterExport(cl,"multiMulti") #move required objects to the cluster
+output.list <- parLapply(cl=cl,X=input.list,fun=multiMulti)
+stopCluster(cl)
+```
+
+
+##Compare Models using BIC and extract parameter estimates from the top model for each species
+##Add model coefficients from top models into a dataframe and export
+#m1 - log.phi_(Intercept) &                                                                      & model
+#m2 - log.phi_(Intercept) & log.phi_TSSR_SPPP                                                    & model     
+#m4 - log.phi_(Intercept) & log.phi_TSSR_SPPP & log.phi_JDAY_SPPP                                & model       
+#m5 - log.phi_(Intercept) & log.phi_TSSR_SPPP & log.phi_JDAY_SPPPP & log.phi_TSSR_SPPP:JDAY_SPPP & model
+#m6 - log.phi_(Intercept) & log.phi_C_SPPP$TSSR2
+```{r}
+#create function to sapply BIC to a list
+bicMulti <- function(x){
+  sapply(x,FUN=BIC)
+}
+
+#estimate BIC values for all models across all species
+bic.list <- lapply(output.list,FUN=bicMulti)
+names(bic.list) <- species
+
+#Create dataframe to contain coefficients
+rem_coef <- data.frame(SPPCODE=species, model=NA, n=NA, sraint=NA,srajday=NA,sratssr=NA,sratssrjday=NA,sratssr2=NA)
+
+#Extracts model coefficients based on top model in BIC tables and assigns them to the correct column
+for (i in species) {
+  model = which(bic.list[[i]]==min(bic.list[[i]])) #determine which model has lowest BIC
+  coef = coef(output.list[[i]][[model]]) #extract coefficients from best model
+  rem_coef[which(rem_coef$SPPCODE==i),"model"]=model
+  rem_coef[which(rem_coef$SPPCODE==i),"n"]=nrow(get(paste0("Y_",i)))
+  if (model==1) {
+    rem_coef[which(rem_coef$SPPCODE==i),"sraint"] = coef[1]
+  }
+  if (model==2) {
+    rem_coef[which(rem_coef$SPPCODE==i),"sraint"] = coef[1]
+    rem_coef[which(rem_coef$SPPCODE==i),"sratssr"] = coef[2]
+  }
+  if (model==3) {
+    rem_coef[which(rem_coef$SPPCODE==i),"sraint"] = coef[1]
+    rem_coef[which(rem_coef$SPPCODE==i),"srajday"] = coef[2]
+  }
+  if (model==4) {
+    rem_coef[which(rem_coef$SPPCODE==i),"sraint"] = coef[1]
+    rem_coef[which(rem_coef$SPPCODE==i),"sratssr"] = coef[2]
+    rem_coef[which(rem_coef$SPPCODE==i),"srajday"] = coef[3]
+  }
+  if (model==5) {
+    rem_coef[which(rem_coef$SPPCODE==i),"sraint"] = coef[1]
+    rem_coef[which(rem_coef$SPPCODE==i),"sratssr"] = coef[2]
+    rem_coef[which(rem_coef$SPPCODE==i),"srajday"] = coef[3]
+    rem_coef[which(rem_coef$SPPCODE==i),"sratssrjday"] = coef[4]
+  }
+  if (model==6) {
+    rem_coef[which(rem_coef$SPPCODE==i),"sraint"] = coef[1]
+    rem_coef[which(rem_coef$SPPCODE==i),"sratssr2"] = coef[2]
+  }
+  rm(coef,model)
+}
+
+#export rem_coef
+write.csv(rem_coef, file="Analysis/DetectionCoefs/remcoef.csv", row.names = F)
+```

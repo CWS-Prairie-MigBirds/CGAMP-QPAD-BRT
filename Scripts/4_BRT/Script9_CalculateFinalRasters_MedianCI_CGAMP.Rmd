@@ -1,0 +1,80 @@
+# ---
+# title: Script 9 - Calculate pixel-based point estimate and 
+#         confidence intervals from bootstrap models
+# author: "Barry Robinson"
+# date: "November 29, 2019"
+# output: html_document
+# ---
+
+#Load and stack extrapolated bootstrap models
+
+library(raster)
+library(stringr)
+#setwd("C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/Results/BRT_rasters_bootstrap")
+setwd("C:/Users/robinsonba/OneDrive - EC-EC/Documents/Projects/CGAMP/Data/Temp/bootstrapModels")
+
+#create list of species based list of extrapolated bootstrap models or create your own custom list
+species <- list.files(recursive = F,full.names = FALSE)
+species <- unique(substr(species, 1,4))
+# species <- c("LARB")
+
+#create list of years over which bootstrap models for given species list have been extrapolated
+years <- vector(mode = "list", length = length(species))
+names(years) <- species
+for (i in species) {
+  years[[i]] <- list.files(pattern = i, recursive = F,full.names = FALSE)
+  loc = unlist(gregexpr('\\.', years[[i]]))
+  years[[i]] <- unique(substr(years[[i]], loc-4, loc-1))
+}
+
+#create list of raster stacks, 1 stack per species-year, along with filenames for final rasters
+stack.list <- vector(mode = "list", length = length(species)*length(years[[i]]))
+count = 1
+for(i in species) {
+  for (j in 1:length(years[[i]])) {
+    files = list.files(pattern = i, full.names = T)
+    files = files[grepl(pattern = years[[i]][[j]], x = files)]
+    #tmp = stack(files)
+    filename = paste0(i,"_",years[[i]][[j]],c("_025", "_50", "_975") ,".tif")
+    stack.list[[count]] <- list(stack = files, folder = i, filename = filename)
+    count = count + 1
+  }
+}
+
+#Check if any species-year combinations have already been completed and remove from list
+# complete <- list.files("C:/Users/robinsonba/OneDrive - EC-EC/Documents/Projects/CGAMP/Data/GIS files/Rasters/PrelimDensityRasters",
+#                        recursive = T, full.names = F)
+complete <- list.files("C:/Users/robinsonba/OneDrive - EC-EC/Documents/Projects/CGAMP/Data/GIS files/Rasters/ReverseAuction/PrelimDensityRasters",
+                       recursive = T, full.names = F)
+complete <- substr(complete, start = 6, stop = nchar(complete))
+remove <- c()
+for (i in 1:length(stack.list)) {
+  if(all(stack.list[[i]]$filename %in% complete)) {remove <- append(remove,i,length(remove))}
+}
+stack.list <- stack.list[-remove]
+
+#load rasters into the stack portion of stack.list
+for(i in 1:length(stack.list)) {
+  stack.list[[i]]$stack <- stack(stack.list[[i]]$stack)
+}
+
+#create function to calculate 0.025, 0.5, and 0.975 quantiles for each raster stack in parrelel
+quantRaster <- function(x) {
+  #setwd("C:/Users/robinsonba/OneDrive - EC-EC/Documents/Projects/CGAMP/Data/GIS files/Rasters/PrelimDensityRasters")
+  setwd("C:/Users/robinsonba/OneDrive - EC-EC/Documents/Projects/CGAMP/Data/GIS files/Rasters/ReverseAuction/PrelimDensityRasters")
+  dir.create(x$folder, showWarnings = F)
+  temp = calc(x$stack, fun = function (y) {quantile(y, probs = c(0.025, 0.5, 0.975), na.rm = T)})
+  temp = unstack(temp)
+  temp = mapply(FUN = function(z,y) {writeRaster(z, filename = y)}, z = temp, y = paste(x$folder, x$file, sep = "/"))
+  return(temp)
+}
+
+
+#implement above function in parrellel
+library(parallel)
+cl <- makeCluster(min(length(stack.list),detectCores()-1))
+clusterEvalQ(cl,{library(raster)}) #load packages in the cluster
+clusterExport(cl,c("quantRaster")) #move required objects to the cluster
+quantiles <- parLapply(cl=cl, X=stack.list, fun=quantRaster)
+stopCluster(cl)
+

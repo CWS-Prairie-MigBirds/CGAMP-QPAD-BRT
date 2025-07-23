@@ -1,0 +1,123 @@
+---
+title: "Link species count data with spatial covariates"
+author: "Barry Robinson"
+date: "October 24, 2019"
+output: html_document
+---
+#setup workspace and load raster files for all spatial covariates
+```{r}
+library(raster)
+setwd("C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/GIS/Rasters/BRT_covariates")
+
+#list all files in working directory (should only contain rasters needed for BRT models)
+file.list <- list.files(pattern = "tif|nc", recursive = T)
+
+#import file.list into raster.list
+raster.list <- lapply(file.list,raster)
+
+#extract name of each raster from file.list and apply it to raster.list
+name.list <- vector(length=length(raster.list))
+for (i in 1:length(raster.list)) {
+  start <- gregexpr("[/]", file.list[i])[[1]]
+  if(length(start)==2) {start <- start[2]+1} else {start <- start[1]+1}
+  end <- gregexpr("[.]", file.list[i])[[1]][1]-1
+  name.list[i] <- substr(file.list[[i]],start,end)
+}
+names(raster.list) <- name.list
+rm(file.list,start,end,i)
+
+#create list with each element containing a stack of rasters for each year **change year range if needed**
+years <- as.character(2009:2018)
+stack.list <- vector(mode="list", length=length(years))
+names(stack.list) <- years
+for (i in years) {
+  #extract names containing the appropriate year (i) plus dem and wetland layers
+  temp = c(grep(i,name.list,value=T),grep("dem|ba|bc",name.list,value=T))  
+  stack.list[[i]] <- stack(raster.list[names(raster.list) %in% temp]) #stack all rasters from appropriate year (i)
+  rm(temp,i)
+}
+rm(raster.list)
+```
+
+#Extract raster values from point count locations
+```{r}
+#load PKEY_XY, which contains coordinates associated with all surveys (PKEYs), and subset necessary columns
+XY <- read.csv("C:/Users/robinsonba/Dropbox/GRASS/Data/PKEY_XY.csv", stringsAsFactors = F)
+XY <- subset(XY, select=c(PCODE,PKEY,YYYY,X,Y))
+
+#load PKEY_model, which specifies all PEKYs to be used in density modelling, and use it to subset PKEY_XY
+load("C:/Users/robinsonba/Dropbox/GRASS/Analysis/BRT_Input/PKEY_model.rda")
+XY <- XY[XY$PKEY %in% PKEY.model,]
+
+#create list of lists containing SpatialPoints (XY locations of point counts), raster stack objects, and PKEY values for each year
+input.list <- vector(mode="list", length=length(years))
+names(input.list) <- years
+for (i in years) {
+  pkeyTemp = XY[which(XY$YYYY==as.numeric(i)),c("PKEY")]
+  xyTemp = SpatialPoints(XY[which(XY$YYYY==as.numeric(i)),c("X","Y")],proj4string=CRS("+proj=longlat +datum=WGS84 +no_defs"))
+  xyTemp = spTransform(xyTemp,crs(stack.list[["2018"]][["grass2018"]]))
+  input.list[[i]] <- list(stack=stack.list[[i]],pts=xyTemp,pkey=pkeyTemp)
+  rm(pkeyTemp,xyTemp,i)
+}
+rm(stack.list)
+
+#create function to extract raster values for each year in parallel and create data.frame
+extract.par <- function(x) {
+  require(raster)
+  covars = extract(x=x$stack, y=x$pts,df=T,method='simple')
+  covars$PKEY = x$pkey
+  return(covars)
+}
+
+#set up clusters for multi-core processing
+library(parallel)
+cl <- makeCluster(detectCores()-1)
+clusterEvalQ(cl,library(raster)) #load package in the cluster
+clusterExport(cl,"input.list"); clusterExport(cl,"extract.par") #move required objects to the cluster
+#run extract in parrallel
+covars <- parLapply(cl=cl, X=input.list, fun=extract.par)
+stopCluster(cl)
+```
+
+#combine covars across all years into a single dataframe and merge with species count data
+```{r}
+#remove year portion of colnames, so that they match across years and add year column
+names(covars) <- years
+for (i in years) {
+  colnames(covars[[i]]) <- gsub(i,"",colnames(covars[[i]]))
+  covars[[i]]$YYYY <- as.numeric(i)
+}
+
+#rbind into one dataframe and remove ID column
+covars <- do.call(rbind,covars)
+covars <- subset(covars, select = -c(ID))
+
+#check for NAs
+apply(covars,2,function(x)any(is.na(x)))
+
+#NA values in all columns, except weather variables
+missCOV <- covars[which(is.na(covars$wt)),] #all PKEYs with missing values are from surveys at the periphery of the study area, where some spatial data are missing, so can be removed
+
+covars <- covars[complete.cases(covars),]
+
+#check for missing PKEYS relative to XY table
+missPKEY <- setdiff(XY$PKEY,covars$PKEY) #data from 2019, which we don't have spatial data for
+```
+
+#load species-specific counts and offsets, merge with covars, and export
+```{r}
+setwd("C:/Users/robinsonba/Dropbox/GRASS/Analysis/BRT_Input")
+load("offsets.rda")
+species <- names(offsets)
+#merge count data with covars and export
+for (i in species) {
+  offsets[[i]] <- merge(offsets[[i]], covars, by = "PKEY")
+  #rearange so that covars are the last columns 
+  offsets[[i]] <- offsets[[i]][,c(which(colnames(offsets[[i]]) %in% c("PKEY","Y","offset","wt")),
+                                which(!(colnames(offsets[[i]]) %in% c("PKEY","Y","offset","wt"))))]
+  data <- offsets[[i]]
+  save(data, file=paste0(i,".rda"))
+  rm(data)
+}
+```
+

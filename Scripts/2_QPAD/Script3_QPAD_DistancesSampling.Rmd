@@ -1,0 +1,170 @@
+---
+title: "QPAD - DISTANCE SAMPLING MODEL"
+author: "Elizabeth Beck"
+date: "October 15, 2018"
+output: html_document
+---
+
+#Details
+distance r  
+g(r) = exp(-r^2/tau^2)  
+* tau^2 is the variance of the unfolded normal distribution describing the rate of distance decay  
+* Assume r is measured without error and detection perfect at r=0  
+* tau = EDR for unlimited distance counts  
+* Use subset with >= 2 distance intervals  
+* Standard practice is to model density as a function of tree cover but as this does not apply in grasslands we are going to use the null model of detection decay over distance  
+
+#Set-up Workspace and load data
+```{r, warning=FALSE, message=FALSE}
+#setwd("C:/Users/becke/Dropbox/Canadian Wildlife Service/Unit_Terrestrial/Robinson_GrasslandBirds/GRASS")
+setwd("C:/Users/robinsonba/Dropbox/GRASS")
+
+library(detect)
+library(data.table)
+library(parallel)
+
+design <- read.csv("Data/Design_DistanceSampling.csv", stringsAsFactors=F) #Design matrix for each distance methods (Access query)
+counts <- read.csv("Data/DistCountMatrix.csv") #Count data organized into distance matrix for distance sampling (Access query)
+```
+
+
+#check for missing interval columns in the counts table (some interval columns may not be present if no observations) and add them
+```{r}
+#Counts table may not contain all of the interval columns in design because some intervals may not have any data. Check column names & missing columns
+colnames(design)
+colnames(counts)
+
+#determine which interval columns are missing from count
+misInt <- setdiff(grep("X",colnames(design), value=T),grep("X",colnames(counts),value=T))
+
+#add missing columns to counts table
+if(length(misInt)>0) {
+  for (i in 1:length(misInt)) {
+    counts[,misInt[[i]]] <- NA
+    }
+}
+
+#reorder and rename interval columns
+intcols <- grep("X",colnames(counts), value=T) #extract interval column names
+intcols <- intcols[order(as.numeric(gsub("\\D", "",intcols)))] #put in numeric order
+counts <- counts[,c(colnames(counts)[!(colnames(counts) %in% intcols)],intcols)] #apply order to counts table
+
+#Change column names so that they are different across counts and design table
+newnamesD <- paste0(rep("Interval",times=length(intcols)), 1:length(intcols))
+setnames(design,old=intcols,new=newnamesD)
+
+newnamesC <- paste0(rep("Int",times=length(intcols)), 1:length(intcols))
+setnames(counts,old=intcols,new=newnamesC)
+
+#check that colnames are correct
+colnames(design)
+colnames(counts)
+
+rm(intcols,misInt)
+
+#Check class for each column
+#str(design)
+# #Interval1 and MaxDist should be numeric, but having Inf values made it import as character
+# design$Interval1 <-as.numeric(design$Interval1)
+# design$MaxDist <-as.numeric(design$MaxDist)
+# 
+#str(counts)
+
+#Check for NAs
+apply(counts, 2, function(x) any(is.na(x))) #only in Int columns
+apply(design, 2, function(x) any(is.na(x))) #only in Int columns
+```
+
+#Join design and count tables based on DISMETH
+```{r}
+CntDsn <- plyr::join(counts, design, by = "DISTMETH", type="left")
+
+#Check for NAs
+apply(CntDsn,2,function(x)any(is.na(x))) #NAs only present in interval columns, which is fine.
+
+#Subset data that has >=2 intervals
+table(CntDsn$DISTMETH) #see how many of each DURMETH are present
+
+remove <- design$DISTMETH[which(is.na(design$Interval2))] #list DISTMETH with only 1 interval
+CntDsn <- CntDsn[!CntDsn$DISTMETH %in% remove,]
+
+table(CntDsn$DISTMETH) #double check that samples were removed
+```
+
+#Change NAs in count table to 0s, where appropriate based on design table
+```{r}
+#Separate counts and designs into separate dataframes
+counts   <- CntDsn[,c("PKEY","SPPCODE","DISTMETH",newnamesC)]
+designPC <- CntDsn[,c("PKEY","SPPCODE","DISTMETH",newnamesD)]
+
+#Rename interval columns in design to match counts (now that they are separated)
+setnames(designPC,old=newnamesD,new=newnamesC)
+
+#Loop across interval columns to change NAs in count table to 0's where appropriate based on design table
+for (i in newnamesC) {
+  counts[which(is.na(counts[,i])),i] <- ifelse(!is.na(designPC[is.na(counts[,i]),i]), 0, NA)
+}
+any(is.na(counts$Int1)) #all NAs have now been updated to 0
+any(is.na(counts$Int2))
+
+#Remove all unneccessary interval columns with only NAs from count and design tables
+for (i in newnamesC) {
+  if (all(is.na(counts[,i]))) {counts[,i]<-NULL}
+  if (all(is.na(designPC[,i]))) {designPC[,i]<-NULL}
+}
+```
+
+#Extract count & distance design matrices by SPPCODE **update with more or less intervals, if neccessary
+```{r}
+#create list of species in counts table
+species <- sort(as.character(unique(counts$SPPCODE)))
+
+#extract data for each species with >=75 observations
+for (i in species) {
+  if(nrow(counts[counts$SPPCODE==i,])>=75) {
+    assign(paste0("Y_",i), as.matrix(counts[counts$SPPCODE==i,newnamesC]))
+    assign(paste0("D_",i), as.matrix(designPC[designPC$SPPCODE==i,newnamesC]))
+  } else {species <- species[!(species %in% i)]}
+}
+```
+
+
+#Model - Run distance sampling model; we are using a null model because habitat covariates are not likely to influence the detection function in open, grasslands ecosystems
+```{r}
+#Create function to implement distance sampling model in parralel
+multiMulti <- function(x) {
+  require(detect)
+  m1 = cmulti(x$Y | x$D ~ 1, type="dis")
+}
+
+#create list of lists contaning count and design matrices for each species; this will be used as inputs into the distance model
+input.list <- vector(mode="list", length=length(species))
+names(input.list) <- species
+for (i in species) {
+  input.list[[i]] <- list(Y=get(paste0("Y_",i)), D=get(paste0("D_",i)))
+}
+
+#set up clusters for multi-core processing and parameterize model across all species simultaeously
+cl <- makeCluster(detectCores()-1) #all cores - 1
+clusterEvalQ(cl,library(detect)) #load package in the cluster
+clusterExport(cl,"input.list"); clusterExport(cl,"multiMulti") #move required objects to the cluster
+output.list <- parLapply(cl=cl,X=input.list,fun=multiMulti)
+stopCluster(cl)
+```
+
+#Extract coefficients from dm models into a dataframe and export
+```{r}
+#create dataframe to contain model coefficients
+dist_coef <- data.frame(SPPCODE=species, n=NA, logtau=NA)
+
+
+#extract coefficients
+for(i in species) {
+  dist_coef[which(dist_coef$SPPCODE==i),"logtau"] <- coef(output.list[[i]])
+  dist_coef[which(dist_coef$SPPCODE==i),"n"]=nrow(get(paste0("Y_",i)))
+}
+
+#export dist_coef
+write.csv(dist_coef, file="Analysis/DetectionCoefs/distcoef.csv",row.names = F)
+```
+

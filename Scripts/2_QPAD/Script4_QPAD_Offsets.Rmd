@@ -1,0 +1,157 @@
+---
+title: "QPAD - OFFSETS"
+author: "Barry Robinson"
+date: "October 15, 2018"
+output: html_document
+---
+
+#Set-up Workspace and load datatables
+```{r}
+setwd("C:/Users/robinsonba/Dropbox/GRASS")
+#setwd("C:/Users/becke/Dropbox/Canadian Wildlife Service/Unit_Terrestrial/Robinson_GrasslandBirds/GRASS")
+
+library(mefa4)
+library(data.table) #to change names efficiently
+
+Y           <- read.csv("Data/PC_SPP.csv") #Access query (all point count observations linked with PKEY)
+distdesign  <- read.csv("Data/Design_DistanceSampling.csv") #Access query
+durdesign   <- read.csv("Data/Design_DurationRemovalSampling.csv") #Access query
+PKEY_TSSR   <- read.csv("Data/PKEY_TSSR.csv") #Export from Script1
+rem_coef <- read.csv("Analysis/DetectionCoefs/remcoef.csv") #Export from Script2
+dist_coef <- read.csv("Analysis/DetectionCoefs/distcoef.csv") #Export from Script3
+
+```
+
+#Add MaxDist & MaxDur to PKEY_TSSR from design tables. Query out PKEYs (surveys) that can't be used for density modelling. Extra data was used in PKEY_TSSR to increase sample size for removal and distance sampling, but some of these data cannot be used for density modelling (e.g. multiple rounds of surveys at the same point count within a year). These extra data were queried out of PC_SPP.csv in Access.
+```{r}
+#query columns needed from design tables and rename count column in Y
+distdesign <- subset(distdesign, select = c(DISTMETH,MaxDist))
+durdesign <- subset(durdesign, select = c(DURMETH,MaxDur))
+setnames(Y, old = c("SumOfAbundance"), new = c("Y"))
+
+#remove PKEYs from PKEY_TSSR that are not in Y (PC_SPP.csv) 
+PKEY.model <- unique(Y$PKEY)
+PKEY_TSSR <- PKEY_TSSR[which(PKEY_TSSR$PKEY %in% PKEY.model),]
+
+#save unique PKEYs from Y so that it can be used to query data later for final BRT modeling
+save(PKEY.model,file="Analysis/BRT_Input/PKEY_model.rda")
+rm(PKEY.model)
+
+#join design tables with PKEY_TSSR
+PKEY <- plyr::join(PKEY_TSSR, distdesign, by = "DISTMETH", type = "left")
+PKEY <- plyr::join(PKEY, durdesign, by = "DURMETH", type = "left")
+
+#Check for NAs
+apply(PKEY, 2, function(x) any(is.na(x)))
+
+# #Look at class of each field
+# str(PKEY)
+# 
+# #Turn MaxDist into a number
+# PKEY$MaxDist <- as.numeric(as.character(PKEY$MaxDist))
+```
+
+#Calculate QPAD offsets for as many species as possible
+```{r}
+#find species that had sufficient sample size to estimate both dist and rem coefs
+species <- intersect(unique(dist_coef$SPPCODE), unique(rem_coef$SPPCODE))
+
+#loop through each species and calculate offsets
+for (i in species) {
+  #retrieve species data and join with PKEY to get TSSR and JDAY covars for each spp record (PKEY)
+  spp = Y[Y$SPPCODE==i,]
+  spp = plyr::join(PKEY, spp, by="PKEY", type="left")
+  
+  #change NA values in Y column to 0
+  spp$SPPCODE[is.na(spp$SPPCODE)] <- i
+  spp$Y[is.na(spp$Y)] <- 0
+  
+  #add species-specific logtau and tau from dist_coef (output from script 3)
+  spp$logtau = dist_coef[which(dist_coef$SPPCODE==i),"logtau"]
+  spp$tau = exp(spp$logtau)
+  
+  #add all species-specific coefficient estimates from rem_coef (output from script 2)
+  spp = plyr::join(spp, rem_coef, by="SPPCODE", type="left")
+  
+  #calculate survey area (A)
+  spp$A = ifelse(spp$MaxDist=="Inf", pi*spp$tau^2, pi*spp$MaxDist^2)
+  
+  #Calculate probability of providing a cue during survey (p) 
+  #Phi calculation is based on which removal model was best for each species (model column)
+  #These are the phi models to choose from:
+  #model 1 phi <- exp(sraint)
+  #model 2 phi <- exp(sraint + (sratssr*TSSR))
+  #model 4 phi <- exp(sraint + (srajday*JDAY) + (sratssr*TSSR))
+  #model 5 phi <- exp(sraint + (srajday*JDAY) + (sratssr*TSSR) + (sratssrjday*TSSR*JDAY))
+  #model 6 phi <- exp(sraint + (sratssr2*TSSR2))
+  if (unique(spp$model)==1) {
+    phi = exp(spp$sraint)  
+  }
+  if (unique(spp$model)==2) {
+    phi = exp(spp$sraint + spp$sratssr*spp$TSSR) 
+  }
+  if (unique(spp$model)==3) {
+    phi = exp(spp$sraint + spp$srajday*spp$JDAY)
+  }
+  if (unique(spp$model)==4) {
+    phi = exp(spp$sraint + spp$sratssr*spp$TSSR + spp$srajday*spp$JDAY)
+  }
+  if (unique(spp$model)==5) {
+    phi = exp(spp$sraint + spp$sratssr*spp$TSSR + spp$srajday*spp$JDAY + spp$sratssrjday*spp$TSSR*spp$JDAY)
+  }
+  if (unique(spp$model)==6) {
+    phi =  exp(spp$sraint + spp$sratssr2*spp$TSSR2)
+  }
+  spp$p = 1-exp(-(spp$MaxDur*phi))
+  
+  #Calculate perceptibility (q), the probability of detecting a species if it provides a cue
+  spp$q = ifelse(spp$MaxDist=="Inf", 1, (spp$tau^2/spp$MaxDist^2)*(1-exp(-(spp$MaxDist^2)/spp$tau^2)))
+  
+  #Calculate the QPAD offsets
+  spp$offset = log(spp$A) + log(spp$p) + log(spp$q)
+  
+  #create species-specific object containing count data and offset calculation for each survey (PKEY)
+  assign(i,spp)
+  rm(spp,phi,i)
+}
+```
+
+#Summarize offsets and Check for NAs
+```{r}
+#Create two dataframes, 1 showing whether there are any columns in each species dataframes with NAs, the other providing summary statistics for offsets across species
+checkNAlist <- vector(mode="list", length(species))
+names(checkNAlist)<-species
+offsetSum <- vector(mode="list", length(species))
+names(offsetSum)<-species
+for (i in species) {
+  checkNAlist[[i]] = as.data.frame(t(as.data.frame(apply(get(i), 2, function(x) any(is.na(x))))))
+  checkNAlist[[i]]$SPP = i
+  row.names(checkNAlist[[i]]) <- NULL
+}
+checkNA <- do.call("rbind",checkNAlist)
+View(checkNA) # only species with NAs in offset column are COYE and SEWR, which didnt have a large enough sample size to estimate tau in distance sampling.
+
+for (i in species) {
+  temp = na.omit(get(i)$offset)
+  offsetSum[[i]] <-  as.data.frame(t(as.data.frame(unclass(summary(temp)))))
+  offsetSum[[i]]$SPP <- i
+  row.names(offsetSum[[i]]) <- NULL
+  rm(temp,i)
+}
+offsetSum <- do.call("rbind",offsetSum)
+View(offsetSum)
+```
+
+#Export species-specific offset files and species list
+```{r}
+#create list of offset files with an element for each species
+offsets <- vector(mode="list", length=length(species))
+names(offsets) <- species
+for (i in species) {
+  offsets[[i]] <- subset(get(i), select = c(PKEY, Y, offset))
+}
+
+#Export offsets as an rda file
+save(species,file="Analysis/BRT_Input/species.rda")
+save(offsets,file="Analysis/BRT_Input/offsets.rda")
+```

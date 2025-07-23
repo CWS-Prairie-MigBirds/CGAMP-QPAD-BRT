@@ -1,0 +1,210 @@
+---
+title: "Build BRT models to tune hyperparameters"
+author: "Barry Rboinson"
+date: "December 17, 2018"
+output: html_document
+---
+
+```{r}
+# setwd("Q:/GW/EC1130MigBirds_OiseauxMig/PN_CWS_MigBirds/Priority_Areas_Analysis/Temp") #wd for InGeo remote desktop
+library(gbm)
+library(dismo)
+library(parallel)
+```
+
+
+#Create list with an element for every BRT model across all species; each element is a list with all BRT inputs
+```{r}
+setwd("C:/Users/robinsonba/OneDrive - EC-EC/Documents/Projects/CGAMP/Data/Data files")
+lr <- c(0.05, 0.01, 0.005, 0.001) #learning rate = j in loop
+tc <- c(2:5) #tree complexity = k in loop
+bf <- c(0.75) #bag fraction = l in loop
+#load("Analysis/BRT_Input/species.rda")
+#species<- c("BAIS","BHCO","BOBO","CCLO","CCSP","COYE","GRSP","HOLA","LARB","LBCU","LCSP","MAGO","MCLO","SAVS","SEWR","SPPI","UPSA","VESP","WEME","WILL")
+species<- c("LCSP", "CCSP", "SAVS", "WIPH", "WILL", "SEWR", "WEKI", "VESP", "HOLA", "EAKI")
+covars <- c("cro","cro_9","cro_25","gra","gra_9","gra_25","per","per_9","per_25","shr","shr_9","shr_25","wet","wet_9","wet_25",                           #landcover
+           "HG_DOY","HG_DOY_9","HG_DOY_25","HG_NDVI","HG_NDVI_9","HG_NDVI_25","LG_DaysToPeak","LG_DaysToPeak_9","LG_DaysToPeak_25",                       #NDVI
+           "LG_NDVI","LG_NDVI_9","LG_NDVI_25","MG_DaysToPeak","MG_DaysToPeak_9","MG_DaysToPeak_25","MG_NDVI","MG_NDVI_9","MG_NDVI_25",                    #NDVI
+           "CHILI","CHILI_9","CHILI_25","TPI","TPI_9","TPI_25","TRI","TRI_9","TRI_25",                                                                    #Topography
+           "CSDI","DD_0","DD5","MAP","MSP","MWMT","MWP","NFFD","SHM","WSDI",                                                                              #Weather
+           "CSDI_L","DD_0_L","DD5_L","MAP_L","MSP_L","MWMT_L","NFFD_L","SHM_L","WSDI_L")                                                                  #weather lag
+           #"rap_biomass.1","rap_biomass.1_9","rap_biomass.1_25","rap_biomass.2","rap_biomass.2_9","rap_biomass.2_25",                                     #RAP biomass
+           #"rap_cover.1","rap_cover.1_9","rap_cover.1_25","rap_cover.2","rap_cover.2_9","rap_cover.2_25","rap_cover.3","rap_cover.3_9","rap_cover.3_25",  #RAP cover
+           #"rap_cover.4","rap_cover.4_9","rap_cover.4_25","rap_cover.5","rap_cover.5_9","rap_cover.5_25","rap_cover.6","rap_cover.6_9","rap_cover.6_25")  #RAP cover
+
+#create empty vector and populate with input values for all BRT models
+model.list <- vector(mode="list", length=length(species)*length(lr)*length(tc)*length(bf))
+count <- 1
+for (i in species) {
+  for (j in lr) {
+    for (k in tc) {
+      for (l in bf) {
+        model.list[[count]] <- list(sp=i, lr=j, tc=k, bf=l, covars = covars)
+        count=count+1
+      }
+    }
+  }
+}
+
+#cycle through model.list and check if model file already exists and if so, check if results are in results table. Remove model from the list if it already exists. Export results from models if results aren't in results table.
+remove <- vector(mode="numeric") #empty vector to collect index of elements to be removed from model.list
+for (i in 1:length(model.list)) {
+  test="STOP"
+  file = paste0(model.list[[i]]$sp, "_tc", model.list[[i]]$tc, "_lr", model.list[[i]]$lr, "_bf", model.list[[i]]$bf, ".RData")
+  if(file.exists(paste0("Analysis/BRT_Output/Models_hyperparams/",file))) {
+    print(paste0(file, " already exists. Removing model from list and checking for results in CV stats table..."))
+    remove <- append(remove, i)
+    if(file.exists("Analysis/BRT_Output/CV_Stats.csv")) {
+      cvstats = read.csv("Analysis/BRT_Output/CV_Stats.csv")
+      if(nrow(cvstats[((cvstats$Species==model.list[[i]]$sp)&(cvstats$ModelName==file)),])>0) {
+        print("Results are in CV stats table.")
+        #test="STOP"
+      } else {
+        print("Results not in CV stats table, exporting now...")
+        load(paste0("Analysis/BRT_Output/Models_hyperparams/",file))
+        test = "GO"
+        }
+    } else {
+      print("Results file does not exist, exporting now...")
+      load(paste0("Analysis/BRT_Output/Models_hyperparams/",file))
+      test = "GO"
+      }
+  }
+  if(test=="GO") {
+    cvstats = data.frame(Species=NA, ModelName=NA, LearningRate=NA,
+                         TreeComplexity=NA, BF=NA, Trees=NA, deviancemean=NA,
+                         deviancese=NA, correlationmean=NA, correlationse=NA)
+    cvstats$Species = model.list[[i]]$sp
+    cvstats$ModelName = file
+    cvstats$LearningRate = model.list[[i]]$lr
+    cvstats$TreeComplexity = model.list[[i]]$tc
+    cvstats$BF = model.list[[i]]$bf
+    cvstats$Trees = model$n.trees
+    cvstats[,7:10] = as.data.frame(model$cv.statistics[1:4])
+    if(file.exists("Analysis/BRT_Output/CV_Stats.csv")) {
+      write.table(cvstats, file="Analysis/BRT_Output/CV_Stats.csv", sep = ",", append=T,
+                  quote=F,col.names=F,row.names=F)
+    } else {write.csv(cvstats,file="Analysis/BRT_Output/CV_Stats.csv",row.names=F)}
+  }
+}
+
+#remove models that already exist from model.list
+if(length(remove) > 0) {model.list <- model.list[-remove]}
+
+#removed un-needed objects and clear memory
+rm(cvstats,bf,count,file,i,j,k,l,remove,tc,test,lr)
+gc()
+```
+
+#Build BRT models for all species and parameters values in parrellel ***Warning loop will take days-weeks to complete***
+```{r}
+#Define function for running BRT models in parallel and exporting results
+BRT.par <- function(x) {
+  load(paste0("Analysis/BRT_Input/", x$sp, ".RData"))
+  #data <- data[complete.cases(data),]
+  file = paste0(x$sp, "_tc", x$tc, "_lr", x$lr, "_bf", x$bf, ".RData")
+  print(paste0("Building model: ", file))
+  covN = which(colnames(data) %in% x$covars)
+  model = gbm.step(data = data,
+                   gbm.x = covN,
+                   gbm.y = which(colnames(data)=="Y"),
+                   family = "poisson",
+                   tree.complexity = x$tc,
+                   learning.rate = x$lr,
+                   bag.fraction = x$bf,
+                   offset = data$Offset,
+                   site.weights=data$wt,
+                   max.trees = 10000,
+                   plot.main=F) #run model
+  print("Model complete, exporting CV stats...")
+  cvstats = data.frame(Species=NA, ModelName=NA, LearningRate=NA,
+                       TreeComplexity=NA, BF=NA, Trees=NA, deviancemean=NA,
+                       deviancese=NA, correlationmean=NA, correlationse=NA)
+  cvstats$Species = x$sp
+  cvstats$ModelName = file
+  cvstats$LearningRate = x$lr
+  cvstats$TreeComplexity = x$tc
+  cvstats$BF = x$bf
+  cvstats$Trees = model$n.trees
+  cvstats[,7:10] = as.data.frame(model$cv.statistics[1:4])
+  if(file.exists("Analysis/BRT_Output/CV_Stats.csv")) {
+    write.table(cvstats, file="Analysis/BRT_Output/CV_Stats.csv", sep = ",", append=T,
+                quote=F,col.names=F,row.names=F)
+  } else {write.csv(cvstats,file="Analysis/BRT_Output/CV_Stats.csv",row.names=F)}
+  
+  print("Saving model...")
+  save(model,file=paste0("Analysis/BRT_Output/Models_hyperparams/",file))
+}
+
+
+cl <- makeCluster(min(length(model.list), detectCores()-2))
+clusterEvalQ(cl,{
+  library(dismo)
+  library(gbm)
+  }) #load package in the cluster
+clusterExport(cl,c("model.list","BRT.par")) #move required objects to the cluster
+clusterEvalQ(cl, sink(paste0("Analysis/BRT_Output/", Sys.getpid(), ".txt")))
+#run extract in parrallel
+parLapply(cl=cl, X=model.list, fun=BRT.par)
+stopCluster(cl)
+```
+
+#Load cross-validation statistics table and make list containing top model for each species and transfer files to TopModel folder
+```{r}
+#load cross-validation statistics table to identify the top model
+setwd("C:/Users/robinsonba/OneDrive - EC-EC/Documents/Projects/CGAMP/Data/Data files")
+cvstats <- read.csv("Analysis/BRT_Output/CV_Stats.csv",stringsAsFactors = F)
+
+#If necessary, load species list, create your own custom list, or get list from unique values in Species column of CV stats tables
+# load("Analysis/BRT_Input/species.rda")
+#species<- c("BAIS","BHCO","BOBO","CCLO","CCSP","COYE","GRSP","HOLA","LARB","LBCU","LCSP","MAGO","MCLO","SAVS","SEWR","SPPI","UPSA","VESP","WEME","WILL")
+species <- unique(cvstats$Species)
+
+#create function to extract top model for a given species
+get.model <- function(x,y) { # x = species, y = cvstats
+  #query out species
+  temp = y[y$Species==x,]
+  #sort by deviance mean
+  temp = temp[order(temp$deviancemean),]
+  #select top model: model with the lowest deviance and < 10000 trees
+  i=1
+  while (temp[i,"Trees"]>=10000) {
+    i=i+1
+  }
+  top.model = temp[i,"ModelName"]
+  return(top.model)
+}
+
+#use get.model to populate list of top models and save 
+top.models <- lapply(species, FUN=get.model, y=cvstats)
+names(top.models) <- species
+saveRDS(top.models, file = "Analysis/BRT_Output/TopModels.rds")
+
+# #create directory for top models
+# dir.create("Analysis/BRT_Output/TopModels",showWarnings=F)
+# #create function to copy top models to a separate folder
+# move.model <- function(x) {
+#   file.copy(paste0("Analysis/BRT_Output/Models/",x), "Analysis/BRT_Output/TopModels", overwrite = F)
+#   unlink(paste0("Analysis/BRT_Output/Models/",x))
+# }
+# #move top models
+# lapply(top.models,FUN=move.model)
+# 
+# #query cvstats table to include top models only
+# top.cvstats <- cvstats[cvstats$ModelName %in% unlist(top.models),]
+# write.csv(top.cvstats, file="Analysis/BRT_Output/CV_Stats_TopModels.csv", row.names = F)
+```
+
+#Create summary table presenting the CVstats for the top models only
+```{r}
+#If running this code chunk in a separate session after all models are complete, load tops models and CVStats
+setwd("C:/Users/robinsonba/OneDrive - EC-EC/Documents/Projects/CGAMP/Data/Data files")
+cvstats <- read.csv("Analysis/BRT_Output/CV_Stats.csv",stringsAsFactors = F)
+top.models <- readRDS("Analysis/BRT_Output/TopModels.rds")
+
+#query out top models only and summary statistics needed, then export
+cvTop <- cvstats[cvstats$ModelName %in% unlist(top.models),]
+cvTop <- cvTop[,c("Species", "ModelName" ,"correlationmean", "correlationse")]
+write.csv(cvTop, "Analysis/BRT_Output/cvStatsTopModels.csv", row.names = F)
+
+```

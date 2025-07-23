@@ -1,0 +1,145 @@
+---
+title: "Build BRT models from bootstrap samples"
+author: "Barry Robinson"
+date: "November 25, 2019"
+output: html_document
+---
+#Load cv stats table for top models. For each species, draw a specified number of bootstrap samples and then create list of input values needed to run gbm for each species and bootstrap sample.
+```{r}
+library(parallel)
+setwd("C:/Users/robinsonba/OneDrive - EC-EC/Documents/Projects/CGAMP/Data/Data files")
+
+#load cv statistics table and top models list and query out top models
+cvstats <- read.csv("Analysis/BRT_Output/CV_Stats.csv")
+top.models <- readRDS("Analysis/BRT_Output/TopModels.rds")
+cvstats <- cvstats[cvstats$ModelName %in% unlist(top.models),]
+
+#remove species/models that do not achieve a minimum correlation mean of 0.1
+cutoff <- cvstats$correlationmean + cvstats$correlationse
+cvstats <- cvstats[cutoff >=0.10,]
+
+#define species list (use first line to list all species with adequate models or second line to create custom list)
+#species <- as.character(unique(cvstats$Species))
+species <- c("LBCU", "WEME", "BOBO", "SEWR", "CCSP", "LCSP", "WILL", "EAKI", "WEKI", "SAVS", "HOLA", "VESP")
+
+#load AOU and IBP species codes tables and extract numeric codes for set.seed
+AOU <- read.csv("C:/Users/robinsonba/OneDrive - EC-EC/Documents/Projects/Priority Areas Analysis/Data/Count Data/GRASS/_Database-GRASS/AOU_SpCodes.csv", stringsAsFactors = F)
+IBP <- read.csv("C:/Users/robinsonba/OneDrive - EC-EC/Documents/Projects/Priority Areas Analysis/Data/Count Data/GRASS/_Database-GRASS/IBPSpeciesCodes.csv", stringsAsFactors = F)
+seed <- merge(AOU[,2:3], IBP[,1:2], by.x="English_Common_Name", by.y="COMMONNAME")
+seed <- seed[seed$SPEC %in% species,c("AOU","SPEC")]
+rm(AOU,IBP,cutoff,top.models)
+
+#load BRT input data for any species to get sample sizes for each year and weights for each observation (should be the same for all species)
+load(paste0("Analysis/BRT_Input/",species[1],".RData"))
+#isoloate 3 columns needed
+data <- data[,c("PKEY","YYYY","wt")]
+#split based on year
+data <- split(data,data$YYYY)
+#sort by PKEY
+data <- lapply(data,FUN=function(x) {return(x[order(x$PKEY),])})
+
+#create function to draw bootstrap samples for each species (x = seed/species table, y = data table with sample weights split by year, z = number of bootstrap samples). Function outputs a list of length (no. species) X (no. bootstrap samples), used as input in gbm.boot function below.
+boot <- function(x=seed,y=data,z) {
+  #create empty list to populate
+  output = vector(mode="list",length=nrow(x)*z)
+  count = 1
+  for (i in x[,"SPEC"]) {
+    #set seed for each species based on AOU species number so random sample is repeatable
+    set.seed(x[x$SPEC==i,"AOU"])
+    for (j in 1:z) {
+      #take bootstrap sample with replacement, stratified by year with probability weighted by inverse of point count density
+      samp = lapply(y,FUN=function(x) {return(sample(nrow(x),size=nrow(x),replace=TRUE, prob=x$wt))})
+      #populate list with row indices for z bootstrap samples for each species, along with hyper-parameters for top model
+      output[[count]] = list(species = i, bootsample = j, sample=samp)
+      count = count+1
+    }
+  }
+  return(output)
+}
+
+#apply function to get input for bootstrap BRT modelling process
+input <- boot(z=100)
+names(input) <- sapply(input, FUN = function(x) {paste0(x$species, "_boot", x$bootsample, ".RData")})
+
+#Check if any models within the input list have already been created; if so, remove from list
+done <- list.files("Analysis/BRT_Output/Models_bootstrap")
+input <- input[names(input) %in% setdiff(names(input),done)]
+rm(done, data, seed, species, boot)
+```
+
+#Produce BRT models from bootstrap samples drawn above for each species **WARNING - MAY TAKE DAYS-WEEKS TO RUN***
+```{r}
+#create function to run gbm for each bootstrap sample in parallel (x = input list from above)
+gbm.boot <- function(x) {
+  require(gbm)
+  setwd("C:/Users/robinsonba/OneDrive - EC-EC/Documents/Projects/CGAMP/Data/Data files/Analysis")
+  #check how many models left to build
+  done = list.files("BRT_Output/Models_bootstrap")
+  cat("\n", length(setdiff(names(input),done)), "models left to build ->", date(), "\n")
+  
+  #load data for given species
+  load(paste0("BRT_Input/",x$species,".RData"))
+  
+  #split data based on year and sort by PKEY
+  data = split(data,data$YYYY)
+  data = lapply(data,FUN=function(x) {return(x[order(x$PKEY),])})
+  
+  #subset data based on row indices from bootstrap sample in input list (input$sample)
+  data = mapply(x=data, y=x$sample, FUN=function(x,y) {return(x[y,])}, SIMPLIFY = F)
+  
+  #rbind into single dataframe
+  data = do.call(rbind, data)
+  
+  #extract tuned hyperparameters for given species from cvstats table (***must be loaded into the cluster)
+  nt = cvstats[cvstats$Species==x$species,"Trees"]
+  lr = cvstats[cvstats$Species==x$species,"LearningRate"]
+  tc = cvstats[cvstats$Species==x$species,"TreeComplexity"]
+  bf = cvstats[cvstats$Species==x$species,"BF"]
+  
+  #extract weights and offsets
+  wt = data$wt
+  of = data$Offset
+  
+  #identify columns in data that should be included: Y (count), Offset, and all the covariate columns
+  columns <- c("Y",
+           "cro","cro_9","cro_25","gra","gra_9","gra_25","per","per_9","per_25","shr","shr_9","shr_25","wet","wet_9","wet_25",                            #landcover
+           "HG_DOY","HG_DOY_9","HG_DOY_25","HG_NDVI","HG_NDVI_9","HG_NDVI_25","LG_DaysToPeak","LG_DaysToPeak_9","LG_DaysToPeak_25",                       #NDVI
+           "LG_NDVI","LG_NDVI_9","LG_NDVI_25","MG_DaysToPeak","MG_DaysToPeak_9","MG_DaysToPeak_25","MG_NDVI","MG_NDVI_9","MG_NDVI_25",                    #NDVI
+           "CHILI","CHILI_9","CHILI_25","TPI","TPI_9","TPI_25","TRI","TRI_9","TRI_25",                                                                    #Topography
+           "CSDI","DD_0","DD5","MAP","MSP","MWMT","MWP","NFFD","SHM","WSDI",                                                                              #Weather
+           "CSDI_L","DD_0_L","DD5_L","MAP_L","MSP_L","MWMT_L","NFFD_L","SHM_L","WSDI_L")                                                                  #weather lag
+  data = data[,which(colnames(data) %in% columns)]
+  
+  
+  #run gbm with bootstrap sample
+  cat("Building model for", x$species, "using bootstrap sample ", x$bootsample, "\n")
+  model = gbm::gbm(data$Y ~ . + offset(of),
+              data=data,
+              n.trees=nt,
+              interaction.depth=tc,
+              shrinkage=lr,
+              bag.fraction=bf,
+              weights = wt,
+              distribution = "poisson",
+              var.monotone = NULL,
+              keep.data = FALSE,
+              verbose = F,
+              n.cores = 1)
+  cat("Model complete, saving now...\n")
+  saveRDS(model,file=paste0("BRT_Output/Models_bootstrap/",x$species, "_boot", x$bootsample, ".RData"))
+}
+
+#Run gbm.boot in parallel
+setwd("C:/Users/robinsonba/OneDrive - EC-EC/Documents/Projects/CGAMP/Data/Data files/Analysis")
+cl <- makeCluster(detectCores()-2)
+clusterEvalQ(cl,{library(gbm)}) #load package in the cluster
+clusterExport(cl,c("input","cvstats","gbm.boot")) #move required objects to the clusters
+clusterEvalQ(cl, sink(paste0("BRT_Output/", Sys.getpid(), ".txt"))) #sink all text from console to txt files
+#run extract in parrallel
+parLapply(cl=cl, X=input, fun=gbm.boot)
+stopCluster(cl)
+
+rm(list = ls())
+gc()
+```
+
