@@ -2,5 +2,9 @@
 .Rhistory
 .RData
 .Ruserdata
-Data/
-Output/
+Data/CountData
+Data/SpatialCovariates
+Output/BootstrapDensityRasters
+Output/FinalDensityRaster
+Output/Models_bootstrap
+Output/Models_hyperparams
