@@ -63,8 +63,6 @@ species <- c("CCLO", "LARB", "SPPI")
 final <- lapply(species, function(x) {
   load(paste0("Data/BRT_Input/", x, ".RData"))
   data = merge(data,drought.final[,c("PKEY","drought","drought_L")], by = "PKEY")
-  #change year to ordinal factor
-  data$YYYY <- ordered(data$YYYY, levels = 2012:2020)
   save(data, file = paste0("Data/BRT_Input/wDrought/",x,".RData"))
   return(data)
 })
