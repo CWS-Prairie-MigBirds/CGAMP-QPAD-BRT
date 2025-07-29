@@ -131,7 +131,7 @@ BRT.par <- function(x) {
   if(file.exists("Output/CV_Stats.csv")) {
     write.table(cvstats, file="Output/CV_Stats.csv", sep = ",", append=T,
                 quote=F,col.names=F,row.names=F)
-  } else {write.csv(cvstats,file="AOutput/CV_Stats.csv",row.names=F)}
+  } else {write.csv(cvstats,file="Output/CV_Stats.csv",row.names=F)}
   
   print("Saving model...")
   save(model,file=paste0("Output/Models_hyperparams/",file))
