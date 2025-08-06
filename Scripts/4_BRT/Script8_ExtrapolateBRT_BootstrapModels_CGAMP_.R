@@ -10,10 +10,8 @@ output: html_document
 library(terra)
 library(dismo)
 library(gbm)
-#setwd("C:/Users/robinsonba/OneDrive - EC-EC/Documents/Projects/CGAMP/Data/Data files/Analysis")
-
 #Enter the year(s) you are extrapolating to
-year <- as.character(c(2021))
+year <- as.character(c(2020))
 
 #create list of all bootstrap models
 models <- list.files("Output/Models_bootstrap")
@@ -100,7 +98,7 @@ extrapolate <- function(x) {
   
   #change open water pixel to have a values of 0
   #load open water raster
-  water <- rast("Data/SpatialCovariates/Landcover/Continuous/wat2021.tif")
+  water <- rast("Data/SpatialCovariates/Landcover/wat2021.tif")
   #crop water raster to match species density raster in case they have different extents
   water <- crop(x = water, y = den)
   #change open water pixels to 0
@@ -108,7 +106,7 @@ extrapolate <- function(x) {
   
   #truncate rasters to 99th percentile of densities every observed in the dataset (previously calcuated and saved in maxDen)
   #isolate maxDen threshold for appropriate species
-  maxDen = read.csv("Data/PointCounts/Processed/maxDen_pixel.csv")
+  maxDen = read.csv("Data/CountData/Processed/maxDen_pixel.csv")
   sp = substr(x$model, 1, 4)
   thres = maxDen[maxDen$species == sp, "max"]
   #truncate to maxDen threshold
