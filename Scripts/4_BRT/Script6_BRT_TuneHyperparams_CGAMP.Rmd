@@ -27,7 +27,7 @@ covars <- c("cro","cro_9","cro_25","gra","gra_9","gra_25","per","per_9","per_25"
            "CHILI","CHILI_9","CHILI_25","TPI","TPI_9","TPI_25","TRI","TRI_9","TRI_25",                                                                    #Topography
            "CSDI","DD_0","DD5","MAP","MSP","MWMT","MWP","NFFD","SHM","WSDI",                                                                              #Weather
            "CSDI_L","DD_0_L","DD5_L","MAP_L","MSP_L","MWMT_L","NFFD_L","SHM_L","WSDI_L",                                                                  #weather lag
-           "drought, drought_L",                                                                                                                          #drought
+           "drought", "drought_L",                                                                                                                          #drought
            "YYYY")                                                                                                                          
            #"rap_biomass.1","rap_biomass.1_9","rap_biomass.1_25","rap_biomass.2","rap_biomass.2_9","rap_biomass.2_25",                                     #RAP biomass
            #"rap_cover.1","rap_cover.1_9","rap_cover.1_25","rap_cover.2","rap_cover.2_9","rap_cover.2_25","rap_cover.3","rap_cover.3_9","rap_cover.3_25",  #RAP cover

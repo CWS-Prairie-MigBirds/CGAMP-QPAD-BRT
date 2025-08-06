@@ -1,0 +1,20 @@
+
+ 96 models left to build -> Tue Aug 05 10:12:17 2025 
+Building model for CCLO using bootstrap sample  12 
+Model complete, saving now...
+
+ 79 models left to build -> Tue Aug 05 12:36:14 2025 
+Building model for CCLO using bootstrap sample  13 
+Model complete, saving now...
+
+ 54 models left to build -> Tue Aug 05 15:01:39 2025 
+Building model for CCLO using bootstrap sample  14 
+Model complete, saving now...
+
+ 40 models left to build -> Tue Aug 05 17:19:16 2025 
+Building model for CCLO using bootstrap sample  15 
+Model complete, saving now...
+
+ 28 models left to build -> Tue Aug 05 18:59:26 2025 
+Building model for CCLO using bootstrap sample  16 
+Model complete, saving now...
