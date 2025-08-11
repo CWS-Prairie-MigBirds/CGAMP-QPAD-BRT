@@ -21,14 +21,15 @@ bf <- c(0.75) #bag fraction = l in loop
 #load("Analysis/BRT_Input/species.rda")
 #species<- c("BAIS","BHCO","BOBO","CCLO","CCSP","COYE","GRSP","HOLA","LARB","LBCU","LCSP","MAGO","MCLO","SAVS","SEWR","SPPI","UPSA","VESP","WEME","WILL")
 species<- c("CCLO", "LARB", "SPPI")
-covars <- c("cro","cro_9","cro_25","gra","gra_9","gra_25","per","per_9","per_25","shr","shr_9","shr_25","wet","wet_9","wet_25",                           #landcover
-           "HG_DOY","HG_DOY_9","HG_DOY_25","HG_NDVI","HG_NDVI_9","HG_NDVI_25","LG_DaysToPeak","LG_DaysToPeak_9","LG_DaysToPeak_25",                       #NDVI
-           "LG_NDVI","LG_NDVI_9","LG_NDVI_25","MG_DaysToPeak","MG_DaysToPeak_9","MG_DaysToPeak_25","MG_NDVI","MG_NDVI_9","MG_NDVI_25",                    #NDVI
-           "CHILI","CHILI_9","CHILI_25","TPI","TPI_9","TPI_25","TRI","TRI_9","TRI_25",                                                                    #Topography
-           "CSDI","DD_0","DD5","MAP","MSP","MWMT","MWP","NFFD","SHM","WSDI",                                                                              #Weather
-           "CSDI_L","DD_0_L","DD5_L","MAP_L","MSP_L","MWMT_L","NFFD_L","SHM_L","WSDI_L",                                                                  #weather lag
-           "drought", "drought_L",                                                                                                                          #drought
-           "YYYY")                                                                                                                          
+covars <- readRDS("Data/BRT_Input/covarnames.rda")
+# covars <- c("cro","cro_9","cro_25","gra","gra_9","gra_25","per","per_9","per_25","shr","shr_9","shr_25","wet","wet_9","wet_25",                           #landcover
+#            "HG_DOY","HG_DOY_9","HG_DOY_25","HG_NDVI","HG_NDVI_9","HG_NDVI_25","LG_DaysToPeak","LG_DaysToPeak_9","LG_DaysToPeak_25",                       #NDVI
+#            "LG_NDVI","LG_NDVI_9","LG_NDVI_25","MG_DaysToPeak","MG_DaysToPeak_9","MG_DaysToPeak_25","MG_NDVI","MG_NDVI_9","MG_NDVI_25",                    #NDVI
+#            "CHILI","CHILI_9","CHILI_25","TPI","TPI_9","TPI_25","TRI","TRI_9","TRI_25",                                                                    #Topography
+#            "CSDI","DD_0","DD5","MAP","MSP","MWMT","MWP","NFFD","SHM","WSDI",                                                                              #Weather
+#            "CSDI_L","DD_0_L","DD5_L","MAP_L","MSP_L","MWMT_L","NFFD_L","SHM_L","WSDI_L",                                                                  #weather lag
+#            "drought", "drought_L",                                                                                                                          #drought
+#            "YYYY")                                                                                                                          
            #"rap_biomass.1","rap_biomass.1_9","rap_biomass.1_25","rap_biomass.2","rap_biomass.2_9","rap_biomass.2_25",                                     #RAP biomass
            #"rap_cover.1","rap_cover.1_9","rap_cover.1_25","rap_cover.2","rap_cover.2_9","rap_cover.2_25","rap_cover.3","rap_cover.3_9","rap_cover.3_25",  #RAP cover
            #"rap_cover.4","rap_cover.4_9","rap_cover.4_25","rap_cover.5","rap_cover.5_9","rap_cover.5_25","rap_cover.6","rap_cover.6_9","rap_cover.6_25")  #RAP cover
@@ -101,7 +102,7 @@ gc()
 ```{r}
 #Define function for running BRT models in parallel and exporting results
 BRT.par <- function(x) {
-  load(paste0("Data/BRT_Input/wDrought/", x$sp, ".RData"))
+  data = readRDS(paste0("Data/BRT_Input/wDrought/final/", x$sp, ".rda"))
   #data <- data[complete.cases(data),]
   file = paste0(x$sp, "_tc", x$tc, "_lr", x$lr, "_bf", x$bf, ".RData")
   print(paste0("Building model: ", file))
@@ -114,7 +115,7 @@ BRT.par <- function(x) {
                    learning.rate = x$lr,
                    bag.fraction = x$bf,
                    offset = data$Offset,
-                   site.weights=data$wt,
+                   #site.weights=data$wt,
                    max.trees = 10000,
                    plot.main=F) #run model
   print("Model complete, exporting CV stats...")

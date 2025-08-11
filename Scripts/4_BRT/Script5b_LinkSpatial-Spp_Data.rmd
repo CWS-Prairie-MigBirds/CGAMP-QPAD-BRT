@@ -6,33 +6,36 @@ output: html_document
 ---
 #setup workspace and load raster files for all spatial covariates
 ```{r}
-library(raster)
-setwd("C:/Users/robinsonba/Documents/Projects/Priority Areas Analysis/Data/GIS/Rasters/BRT_covariates")
-
+library(terra)
 #list all files in working directory (should only contain rasters needed for BRT models)
-file.list <- list.files(pattern = "tif|nc", recursive = T)
+file.list <- list.files("Data/SpatialCovariates", pattern = "tif|nc", recursive = T, full.names = T)
 
 #import file.list into raster.list
-raster.list <- lapply(file.list,raster)
+raster.list <- rast(file.list)
 
 #extract name of each raster from file.list and apply it to raster.list
-name.list <- vector(length=length(raster.list))
-for (i in 1:length(raster.list)) {
-  start <- gregexpr("[/]", file.list[i])[[1]]
-  if(length(start)==2) {start <- start[2]+1} else {start <- start[1]+1}
-  end <- gregexpr("[.]", file.list[i])[[1]][1]-1
-  name.list[i] <- substr(file.list[[i]],start,end)
-}
-names(raster.list) <- name.list
-rm(file.list,start,end,i)
+name.list <- lapply(file.list, FUN = function(x) {
+  tmp = sub(".*/", "", x)
+  tmp = sub("\\..*", "", tmp)
+  return(tmp)
+})
+
+# for (i in 1:nlyr(raster.list)) {
+#   start <- gregexpr("[/]", file.list[i])[[1]]
+#   if(length(start)==2) {start <- start[2]+1} else {start <- start[1]+1}
+#   end <- gregexpr("[.]", file.list[i])[[1]][1]-1
+#   name.list[i] <- substr(file.list[[i]],start,end)
+# }
+names(raster.list) <- unlist(name.list)
+rm(file.list)
 
 #create list with each element containing a stack of rasters for each year **change year range if needed**
-years <- as.character(2009:2018)
+years <- as.character(2012:2021)
 stack.list <- vector(mode="list", length=length(years))
 names(stack.list) <- years
 for (i in years) {
   #extract names containing the appropriate year (i) plus dem and wetland layers
-  temp = c(grep(i,name.list,value=T),grep("dem|ba|bc",name.list,value=T))  
+  temp = c(grep(i,name.list,value=T),grep("CHILI|TPI|TRI",name.list,value=T))  
   stack.list[[i]] <- stack(raster.list[names(raster.list) %in% temp]) #stack all rasters from appropriate year (i)
   rm(temp,i)
 }
@@ -56,7 +59,7 @@ for (i in years) {
   pkeyTemp = XY[which(XY$YYYY==as.numeric(i)),c("PKEY")]
   xyTemp = SpatialPoints(XY[which(XY$YYYY==as.numeric(i)),c("X","Y")],proj4string=CRS("+proj=longlat +datum=WGS84 +no_defs"))
   xyTemp = spTransform(xyTemp,crs(stack.list[["2018"]][["grass2018"]]))
-  input.list[[i]] <- list(stack=stack.list[[i]],pts=xyTemp,pkey=pkeyTemp)
+  input.list[[i]] <- list(stack=stack.list[[i]],pts=xyTemp,pkey=pkeyTemp) for
   rm(pkeyTemp,xyTemp,i)
 }
 rm(stack.list)
