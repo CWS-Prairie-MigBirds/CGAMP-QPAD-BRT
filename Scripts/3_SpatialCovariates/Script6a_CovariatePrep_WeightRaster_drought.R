@@ -33,3 +33,5 @@ for (i in years) {
   #export raster
   writeRaster(wtRaster.list[[i]], filename=paste0("Data/SpatialCovariates/SampleWeight/wt",i,".tif"))
 }
+
+test<- rast("Data/SpatialCovariates/sampleWeight/wt2012.tif")
