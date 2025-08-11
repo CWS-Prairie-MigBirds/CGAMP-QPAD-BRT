@@ -4,7 +4,5 @@
 .Ruserdata
 Data/CountData
 Data/SpatialCovariates
-Output/BootstrapDensityRasters
-Output/FinalDensityRaster
-Output/Models_bootstrap
-Output/Models_hyperparams
+Data/RawSpatialCovariates
+Output

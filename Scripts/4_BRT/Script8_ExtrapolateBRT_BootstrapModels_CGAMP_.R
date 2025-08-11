@@ -11,14 +11,15 @@ library(terra)
 library(dismo)
 library(gbm)
 #Enter the year(s) you are extrapolating to
-year <- as.character(c(2020))
+year <- as.character(c(2012:2019))
 
 #create list of all bootstrap models
 models <- list.files("Output/Models_bootstrap")
 
 #run one of these line if you want to add or remove models based on a list of species***
 #models <- models[!grepl(pattern = "CASP|CONI|EAME|NOBO|STGR", models)]
-species <- "BAIS|BOBO|CASP|CCLO|CONI|EAME|GRSP|LARB|LOSH|LBCU|MAGO|NOBO|SPPI|TBLO|UPSA|WEME"
+#species <- "BAIS|BOBO|CASP|CCLO|CONI|EAME|GRSP|LARB|LOSH|LBCU|MAGO|NOBO|SPPI|TBLO|UPSA|WEME"
+species <- "LARB|CCLO|SPPI"
 models <- models[grep(pattern = species, models)]
 
 #create list of models to extrapolate
@@ -128,7 +129,7 @@ extrapolate <- function(x) {
 
 #implement above function in parallel
 library(parallel)
-cl <- makeCluster(5)
+cl <- makeCluster(4)
 clusterEvalQ(cl,{
   library(terra)
   library(dismo)

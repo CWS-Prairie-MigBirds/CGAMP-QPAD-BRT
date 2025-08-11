@@ -7,7 +7,7 @@ template <- rast("Data/SpatialCovariates/cgamp_ras.tif")
 
 #populate with years of interest and save
 #define years of interest
-years <- c(2020)
+years <- c(2012:2019)
 YYYY.list <- lapply(years, FUN = function(x) {
   yyyy.tmp = template
   yyyy.tmp[!is.na(yyyy.tmp)] = x
