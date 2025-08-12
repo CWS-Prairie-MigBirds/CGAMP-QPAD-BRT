@@ -114,6 +114,7 @@ for (i in species) {
   count.list[[i]] <- left_join(x = covars, y = count.list[[i]], by = "PKEY")
   #remove all data south of 44th latitude to restrict analysis to Northern Great Plains
   data <- count.list[[i]] %>% filter(lat >=44)
+  data$Offset = log(data$Offset)
   saveRDS(data, file=paste0("Data/BRT_Input/wDrought/final/", i, ".rda"))
   rm(data)
 }
@@ -122,3 +123,8 @@ for (i in species) {
 data.list <- list.files(pattern = ".rda","Data/BRT_Input/wDrought/final", full.names = T)
 #load count data and remove unnecessary columns
 data.list <- lapply(data.list, readRDS)
+
+data.list_ <- list.files(pattern = ".rda","Data/BRT_Input/wDrought/", full.names = T)
+#load count data and remove unnecessary columns
+data.list_ <- lapply(data.list_, readRDS)
+larb <- readRDS("Data/BRT_Input/wDrought/LARB.rda")
